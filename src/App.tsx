@@ -10,6 +10,7 @@ import {
   FileText,
   Loader2,
   PanelLeft,
+  RefreshCw,
   X,
 } from 'lucide-react';
 import type {
@@ -52,6 +53,7 @@ import {
   subscribeToSections,
   subscribeToTrashedSections,
   subscribeToTrashedStories,
+  syncFirestoreConnection,
   updateSectionContentInCloud,
   updateStoryModelInCloud,
   updateStoryRefinedEndingInCloud,
@@ -147,6 +149,8 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   const sectionsRef = useRef<ManuscriptSection[]>([]);
 
   const [pendingSyncOps, setPendingSyncOps] = useState(0);
+  const [isManualSyncing, setIsManualSyncing] = useState(false);
+  const [syncPulseState, setSyncPulseState] = useState<'idle' | 'synced' | 'offline'>('idle');
   const [isUploadingAudio, setIsUploadingAudio] = useState(false);
   const [reprocessingSectionId, setReprocessingSectionId] = useState<string | null>(null);
   const [trashBusyItemId, setTrashBusyItemId] = useState<string | null>(null);
@@ -157,6 +161,11 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   const [copiedFull, setCopiedFull] = useState(false);
 
   const toastTimeoutRef = useRef<number | null>(null);
+  const syncPulseTimeoutRef = useRef<number | null>(null);
+  const lastHiddenAtRef = useRef<number>(0);
+  const lastResumeSyncAtRef = useRef<number>(0);
+  const resumeSyncInFlightRef = useRef<boolean>(false);
+  const activeSessionIdRef = useRef<string>('');
   const bootstrappedRef = useRef<boolean>(false);
   const initialPurgeRanRef = useRef<boolean>(false);
 
@@ -219,6 +228,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   }, [sectionDrafts]);
 
   useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
     if (activeSessionId) {
       saveActiveSessionId(activeSessionId);
     }
@@ -235,6 +245,9 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       if (toastTimeoutRef.current !== null) {
         window.clearTimeout(toastTimeoutRef.current);
       }
+      if (syncPulseTimeoutRef.current !== null) {
+        window.clearTimeout(syncPulseTimeoutRef.current);
+      }
       if (titleDebounceRef.current !== null) {
         window.clearTimeout(titleDebounceRef.current);
       }
@@ -243,6 +256,76 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       }
     };
   }, []);
+
+  const triggerSyncPulse = useCallback((state: 'synced' | 'offline') => {
+    setSyncPulseState(state);
+    if (syncPulseTimeoutRef.current !== null) {
+      window.clearTimeout(syncPulseTimeoutRef.current);
+    }
+    syncPulseTimeoutRef.current = window.setTimeout(() => {
+      setSyncPulseState('idle');
+    }, 2600);
+  }, []);
+
+  // Automatic lightweight background sync when returning to the iOS PWA or refocusing the tab
+  useEffect(() => {
+    const runResumeSync = (forceReconnect: boolean) => {
+      if (resumeSyncInFlightRef.current) return;
+      const now = Date.now();
+      if (now - lastResumeSyncAtRef.current < 5000) return;
+
+      lastResumeSyncAtRef.current = now;
+      resumeSyncInFlightRef.current = true;
+
+      void syncFirestoreConnection({
+        uid,
+        activeStoryId: activeSessionIdRef.current || undefined,
+        forceReconnect,
+        verifyServer: false,
+      })
+        .then(({ online }) => {
+          triggerSyncPulse(online ? 'synced' : 'offline');
+        })
+        .catch(() => {
+          // Non-fatal; active onSnapshot listeners keep retrying automatically
+        })
+        .finally(() => {
+          resumeSyncInFlightRef.current = false;
+        });
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        lastHiddenAtRef.current = Date.now();
+      } else if (document.visibilityState === 'visible') {
+        const hiddenDuration =
+          lastHiddenAtRef.current > 0 ? Date.now() - lastHiddenAtRef.current : 0;
+        lastHiddenAtRef.current = 0;
+        runResumeSync(hiddenDuration >= 2500);
+      }
+    };
+
+    const handleWindowFocus = () => {
+      if (document.visibilityState === 'visible') {
+        runResumeSync(false);
+      }
+    };
+
+    const handleOnline = () => {
+      lastResumeSyncAtRef.current = 0;
+      runResumeSync(true);
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleWindowFocus);
+    window.addEventListener('online', handleOnline);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleWindowFocus);
+      window.removeEventListener('online', handleOnline);
+    };
+  }, [uid, triggerSyncPulse]);
 
   // Real-time Firestore listener for only the 30 most recent lightweight story metadata docs
   useEffect(() => {
@@ -1064,7 +1147,46 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     (s) => getActiveSectionVersion(s).text.trim().length > 0,
   );
 
-  const isSyncing = pendingSyncOps > 0 || Object.keys(sectionDrafts).length > 0;
+  const isSyncing = pendingSyncOps > 0 || isManualSyncing || Object.keys(sectionDrafts).length > 0;
+
+  // Manual header sync button handler (flushes local drafts, re-verifies Firestore, pulses "Synced")
+  const handleManualSync = async () => {
+    if (isManualSyncing) return;
+    setIsManualSyncing(true);
+    setGlobalError(null);
+    const startedAt = Date.now();
+
+    try {
+      // Flush any unsaved title or section drafts before syncing
+      if (titleDirtyRef.current && activeSession) {
+        handleTitleInputBlur();
+      }
+      const pendingDraftIds = Object.keys(sectionDraftsRef.current);
+      if (pendingDraftIds.length > 0) {
+        await Promise.allSettled(pendingDraftIds.map((secId) => flushSectionDraft(secId)));
+      }
+
+      const { online } = await syncFirestoreConnection({
+        uid,
+        activeStoryId: activeSessionId || undefined,
+        forceReconnect: true,
+        verifyServer: true,
+      });
+
+      // Keep spin visible briefly so the tap feels crisp and responsive
+      const elapsed = Date.now() - startedAt;
+      if (elapsed < 450) {
+        await new Promise((resolve) => setTimeout(resolve, 450 - elapsed));
+      }
+
+      triggerSyncPulse(online ? 'synced' : 'offline');
+    } catch (err) {
+      setGlobalError(formatCloudErrorMessage(err));
+      triggerSyncPulse('offline');
+    } finally {
+      setIsManualSyncing(false);
+    }
+  };
 
   // Build ConfirmDialog copy based on pending action
   const confirmDialogConfig = useMemo(() => {
@@ -1103,7 +1225,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
 
   if (!storiesLoaded) {
     return (
-      <div className="flex h-screen w-full flex-col items-center justify-center bg-white px-6 text-[#111827]">
+      <div className="safe-top safe-bottom flex h-[100dvh] w-full flex-col items-center justify-center bg-white px-6 text-[#111827]">
         <div className="flex flex-col items-center gap-3 text-center">
           <Loader2 className="h-5 w-5 animate-spin text-[#4338CA]" aria-hidden="true" />
           <p className="text-sm font-medium text-[#6B7280]">Loading your cloud stories…</p>
@@ -1118,7 +1240,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   }
 
   return (
-    <div className="flex h-screen w-full overflow-hidden bg-white text-[#111827]">
+    <div className="flex h-[100dvh] w-full overflow-hidden bg-white text-[#111827]">
       <Sidebar
         sessions={activeStories}
         activeSessionId={activeSession?.id ?? ''}
@@ -1159,132 +1281,182 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
 
       {/* Main editorial column */}
       <div className="flex min-w-0 flex-1 flex-col bg-white">
-        {/* Top document utility bar */}
-        <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-[#E5E7EB] bg-white px-4 sm:px-6">
-          <div className="flex min-w-0 items-center gap-3">
-            {!sidebarOpen && (
-              <button
-                type="button"
-                onClick={() => setSidebarOpen(true)}
-                aria-label="Open sidebar"
-                title="Open stories sidebar"
-                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[#4B5563] transition-colors duration-150 hover:bg-[#F3F4F6] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA]"
-              >
-                <PanelLeft className="h-4 w-4" />
-              </button>
-            )}
-
-            <div className="flex min-w-0 items-center gap-2 text-sm">
-              {!sidebarOpen && (
-                <>
-                  <div className="inline-flex shrink-0 items-center gap-2">
-                    <img
-                      src={BRAND_LOGO_URL}
-                      alt="SarYay"
-                      width={32}
-                      height={32}
-                      className="h-8 w-8 shrink-0 rounded-full border border-[#E5E7EB] bg-white object-cover"
-                    />
-                    <span className="hidden whitespace-nowrap font-semibold tracking-tight text-[#111827] sm:inline">
-                      SarYay
-                    </span>
-                  </div>
-                  <span aria-hidden="true" className="hidden text-[#D1D5DB] sm:inline">
-                    /
-                  </span>
-                </>
-              )}
-              <span className="truncate font-medium text-[#374151]">
-                {activeView === 'trash'
-                  ? 'Trash'
-                  : activeSession
-                    ? titleDraft || activeSession.title || 'Untitled Story'
-                    : 'Stories'}
-              </span>
-
-              {/* Minimal Cloud Sync / Upload Indicator */}
-              <span
-                className={`ml-1 hidden shrink-0 items-center gap-1 text-[11px] sm:inline-flex ${
-                  isUploadingAudio
-                    ? 'font-medium text-[#4338CA]'
-                    : isSyncing
-                      ? 'text-[#6B7280]'
-                      : 'text-[#9CA3AF]'
-                }`}
-                aria-live="polite"
-              >
-                {isUploadingAudio ? (
-                  <>
-                    <CloudUpload className="h-3.5 w-3.5 animate-pulse" />
-                    <span>Uploading audio…</span>
-                  </>
-                ) : isSyncing ? (
-                  <>
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                    <span>Syncing…</span>
-                  </>
-                ) : (
-                  <>
-                    <Cloud className="h-3.5 w-3.5" />
-                    <span>Synced</span>
-                  </>
+        {/* Top document utility bar (safe-top clears iPhone Dynamic Island / status bar) */}
+        <header className="safe-top shrink-0 border-b border-[#E5E7EB] bg-white">
+          <div className="flex h-14 items-center justify-between gap-2 px-3 sm:gap-3 sm:px-6">
+            <div className="flex min-w-0 flex-1 items-center gap-1.5 sm:gap-2.5">
+              <div className="flex shrink-0 items-center gap-0.5">
+                {!sidebarOpen && (
+                  <button
+                    type="button"
+                    onClick={() => setSidebarOpen(true)}
+                    aria-label="Open sidebar"
+                    title="Open stories sidebar"
+                    className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[#4B5563] transition-colors duration-150 hover:bg-[#F3F4F6] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA]"
+                  >
+                    <PanelLeft className="h-4 w-4" />
+                  </button>
                 )}
-              </span>
-            </div>
-          </div>
 
-          <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
-            {activeView === 'story' && activeSession && (
-              <>
                 <button
                   type="button"
-                  disabled={!hasContent}
-                  onClick={handleCopyFullStory}
-                  className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-3 py-1.5 text-xs font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-not-allowed disabled:opacity-45"
+                  disabled={isManualSyncing}
+                  onClick={() => {
+                    void handleManualSync();
+                  }}
+                  aria-label="Sync with cloud"
+                  title="Sync latest changes from Firebase"
+                  className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors duration-150 hover:bg-[#F3F4F6] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-wait sm:h-9 sm:w-9 ${
+                    isManualSyncing
+                      ? 'text-[#4338CA]'
+                      : syncPulseState === 'synced'
+                        ? 'text-[#16A34A]'
+                        : 'text-[#6B7280] hover:text-[#111827]'
+                  }`}
                 >
-                  {copiedFull ? (
+                  <RefreshCw className={`h-4 w-4 ${isManualSyncing ? 'animate-spin' : ''}`} />
+                </button>
+              </div>
+
+              <div className="flex min-w-0 flex-1 items-center gap-2 text-sm">
+                {!sidebarOpen && (
+                  <>
+                    <div className="inline-flex shrink-0 items-center gap-2">
+                      <img
+                        src={BRAND_LOGO_URL}
+                        alt="SarYay"
+                        width={32}
+                        height={32}
+                        className="h-7 w-7 shrink-0 rounded-full border border-[#E5E7EB] bg-white object-cover sm:h-8 sm:w-8"
+                      />
+                      <span className="hidden whitespace-nowrap font-semibold tracking-tight text-[#111827] sm:inline">
+                        SarYay
+                      </span>
+                    </div>
+                    <span aria-hidden="true" className="hidden text-[#D1D5DB] sm:inline">
+                      /
+                    </span>
+                  </>
+                )}
+                <span className="min-w-0 truncate font-medium text-[#374151]">
+                  {activeView === 'trash'
+                    ? 'Trash'
+                    : activeSession
+                      ? titleDraft || activeSession.title || 'Untitled Story'
+                      : 'SarYay'}
+                </span>
+
+                {/* Minimal Cloud Sync / Upload Indicator + Subtle Synced Pulse */}
+                <span
+                  className={`ml-0.5 shrink-0 items-center gap-1 text-[11px] transition-colors duration-200 ${
+                    syncPulseState !== 'idle' || isManualSyncing
+                      ? 'inline-flex'
+                      : 'hidden sm:inline-flex'
+                  } ${
+                    isUploadingAudio
+                      ? 'font-medium text-[#4338CA]'
+                      : syncPulseState === 'synced'
+                        ? 'font-medium text-[#16A34A]'
+                        : syncPulseState === 'offline'
+                          ? 'font-medium text-[#D97706]'
+                          : isSyncing
+                            ? 'text-[#6B7280]'
+                            : 'text-[#9CA3AF]'
+                  }`}
+                  aria-live="polite"
+                >
+                  {isUploadingAudio ? (
                     <>
-                      <Check className="h-3.5 w-3.5 text-[#16A34A]" />
-                      <span className="text-[#16A34A]">Copied</span>
+                      <CloudUpload className="h-3.5 w-3.5 animate-pulse" />
+                      <span>Uploading audio…</span>
+                    </>
+                  ) : isSyncing ? (
+                    <>
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      <span>Syncing…</span>
+                    </>
+                  ) : syncPulseState === 'synced' ? (
+                    <>
+                      <span
+                        className="h-1.5 w-1.5 rounded-full bg-[#16A34A] animate-pulse"
+                        aria-hidden="true"
+                      />
+                      <span>Synced</span>
+                    </>
+                  ) : syncPulseState === 'offline' ? (
+                    <>
+                      <span
+                        className="h-1.5 w-1.5 rounded-full bg-[#D97706]"
+                        aria-hidden="true"
+                      />
+                      <span>Offline</span>
                     </>
                   ) : (
                     <>
-                      <Copy className="h-3.5 w-3.5" />
-                      <span className="hidden sm:inline">Copy Full Story</span>
-                      <span className="sm:hidden">Copy</span>
+                      <Cloud className="h-3.5 w-3.5" />
+                      <span>Synced</span>
                     </>
                   )}
-                </button>
+                </span>
+              </div>
+            </div>
 
-                <button
-                  type="button"
-                  disabled={!hasContent}
-                  onClick={handleExportTxt}
-                  title="Export full story as plain text (.txt)"
-                  className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-3 py-1.5 text-xs font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-not-allowed disabled:opacity-45"
-                >
-                  <FileText className="h-3.5 w-3.5" />
-                  <span>.txt</span>
-                </button>
+            <div className="flex shrink-0 items-center gap-1 sm:gap-2">
+              {activeView === 'story' && activeSession && (
+                <>
+                  <button
+                    type="button"
+                    disabled={!hasContent}
+                    onClick={handleCopyFullStory}
+                    aria-label={copiedFull ? 'Copied full story' : 'Copy full story'}
+                    title="Copy full story"
+                    className="inline-flex h-8 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-2 text-xs font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-not-allowed disabled:opacity-45 sm:h-auto sm:px-3 sm:py-1.5"
+                  >
+                    {copiedFull ? (
+                      <>
+                        <Check className="h-3.5 w-3.5 text-[#16A34A]" />
+                        <span className="hidden text-[#16A34A] sm:inline">Copied</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="h-3.5 w-3.5" />
+                        <span className="hidden sm:inline">Copy Full Story</span>
+                      </>
+                    )}
+                  </button>
 
-                <button
-                  type="button"
-                  disabled={!hasContent}
-                  onClick={handleExportMd}
-                  title="Export full session sequentially as Markdown (.md)"
-                  className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-3 py-1.5 text-xs font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-not-allowed disabled:opacity-45"
-                >
-                  <FileDown className="h-3.5 w-3.5" />
-                  <span className="hidden sm:inline">Export as .md</span>
-                  <span className="sm:hidden">.md</span>
-                </button>
-              </>
-            )}
+                  <button
+                    type="button"
+                    disabled={!hasContent}
+                    onClick={handleExportTxt}
+                    aria-label="Export as .txt"
+                    title="Export full story as plain text (.txt)"
+                    className="inline-flex h-8 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-2 text-xs font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-not-allowed disabled:opacity-45 sm:h-auto sm:px-3 sm:py-1.5"
+                  >
+                    <FileText className="hidden h-3.5 w-3.5 sm:inline" />
+                    <span>.txt</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={!hasContent}
+                    onClick={handleExportMd}
+                    aria-label="Export as .md"
+                    title="Export full session sequentially as Markdown (.md)"
+                    className="inline-flex h-8 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-2 text-xs font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-not-allowed disabled:opacity-45 sm:h-auto sm:px-3 sm:py-1.5"
+                  >
+                    <FileDown className="hidden h-3.5 w-3.5 sm:inline" />
+                    <span className="hidden sm:inline">Export as .md</span>
+                    <span className="sm:hidden">.md</span>
+                  </button>
+                </>
+              )}
+            </div>
           </div>
         </header>
 
         {/* Scrollable main canvas (either Trash Bin view or active Story workspace) */}
-        <main className="flex-1 overflow-y-auto bg-white">
+        <main className="safe-bottom-scroll flex-1 overflow-y-auto bg-white">
           {globalError && activeView === 'trash' && (
             <div className="mx-auto max-w-[780px] px-5 pt-6 sm:px-10">
               <div
@@ -1545,7 +1717,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
         <div
           role="status"
           aria-live="polite"
-          className="fixed bottom-5 right-5 z-50 rounded-lg bg-[#111827] px-4 py-2.5 text-xs font-medium text-white shadow-sm"
+          className="safe-toast-bottom fixed right-4 z-50 rounded-lg bg-[#111827] px-4 py-2.5 text-xs font-medium text-white shadow-sm sm:right-5"
         >
           {toastMessage}
         </div>

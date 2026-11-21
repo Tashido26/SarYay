@@ -2,9 +2,13 @@ import {
   Timestamp,
   collection,
   deleteDoc,
+  disableNetwork,
   doc,
+  enableNetwork,
   getDoc,
+  getDocFromServer,
   getDocs,
+  getDocsFromServer,
   limit,
   onSnapshot,
   orderBy,
@@ -13,6 +17,7 @@ import {
   setDoc,
   startAfter,
   updateDoc,
+  waitForPendingWrites,
   where,
   writeBatch,
   type DocumentData,
@@ -310,6 +315,73 @@ function parseTrashedSectionDoc(id: string, data: Record<string, unknown>): Tras
 // ---------------------------------------------------------------------------
 
 export const STORIES_PAGE_SIZE = 30;
+
+/**
+ * Re-establishes Firestore's live WebChannel after iOS PWA background suspension
+ * and optionally performs a lightweight 1-document server round-trip check on manual sync.
+ * Active onSnapshot listeners retain IndexedDB watch resume tokens so only server deltas sync.
+ */
+export async function syncFirestoreConnection(params: {
+  uid: string;
+  activeStoryId?: string;
+  forceReconnect?: boolean;
+  verifyServer?: boolean;
+}): Promise<{ online: boolean }> {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return { online: false };
+  }
+
+  try {
+    if (params.forceReconnect) {
+      await disableNetwork(db);
+    }
+    await enableNetwork(db);
+
+    await Promise.race([
+      waitForPendingWrites(db),
+      new Promise<void>((resolve) => setTimeout(resolve, 4000)),
+    ]);
+
+    if (params.verifyServer) {
+      const verifyPath = params.activeStoryId
+        ? `users/${params.uid}/stories/${params.activeStoryId}`
+        : `users/${params.uid}/stories`;
+
+      try {
+        if (params.activeStoryId) {
+          await getDocFromServer(doc(db, verifyPath));
+        } else {
+          const pingQuery = query(
+            collection(db, verifyPath),
+            orderBy('updatedAt', 'desc'),
+            limit(1),
+          );
+          await getDocsFromServer(pingQuery);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
+        if (msg.includes('offline') || msg.includes('unavailable') || msg.includes('network')) {
+          return { online: false };
+        }
+        if (!msg.includes('not-found')) {
+          handleFirestoreError(
+            err,
+            params.activeStoryId ? OperationType.GET : OperationType.LIST,
+            verifyPath,
+          );
+        }
+      }
+    }
+
+    return { online: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
+    if (msg.includes('offline') || msg.includes('unavailable') || msg.includes('network')) {
+      return { online: false };
+    }
+    throw err;
+  }
+}
 
 export type StoryCursor = QueryDocumentSnapshot<DocumentData>;
 

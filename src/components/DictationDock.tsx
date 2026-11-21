@@ -50,17 +50,45 @@ interface DictationDockProps {
 const ACCEPTED_AUDIO_EXTENSIONS = ['.mp3', '.wav', '.m4a', '.webm', '.ogg'];
 const MAX_UPLOAD_BYTES = 60 * 1024 * 1024;
 
+function isAppleSafariBrowser(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  const isIOS =
+    /iPad|iPhone|iPod/.test(ua) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isSafari = /Safari/.test(ua) && !/Chrome|Chromium|CriOS|FxiOS|Edg/.test(ua);
+  return isIOS || isSafari;
+}
+
 function pickSupportedRecorderMime(): string {
-  if (typeof MediaRecorder === 'undefined') return '';
-  const candidates = [
-    'audio/webm;codecs=opus',
-    'audio/webm',
-    'audio/ogg;codecs=opus',
-    'audio/mp4',
-  ];
+  if (typeof MediaRecorder === 'undefined' || typeof MediaRecorder.isTypeSupported !== 'function') {
+    return '';
+  }
+  const appleSafari = isAppleSafariBrowser();
+  // On iOS/Safari, prefer native MP4/AAC containers so recorded blobs play reliably on iPhone & Mac
+  const candidates = appleSafari
+    ? [
+        'audio/mp4;codecs=mp4a.40.2',
+        'audio/mp4',
+        'audio/aac',
+        'audio/webm;codecs=opus',
+        'audio/webm',
+      ]
+    : [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/mp4;codecs=mp4a.40.2',
+        'audio/mp4',
+        'audio/aac',
+        'audio/ogg;codecs=opus',
+      ];
   for (const mime of candidates) {
-    if (MediaRecorder.isTypeSupported(mime)) {
-      return mime;
+    try {
+      if (MediaRecorder.isTypeSupported(mime)) {
+        return mime;
+      }
+    } catch {
+      // Ignore invalid MIME query on older WebKit builds
     }
   }
   return '';
@@ -249,6 +277,9 @@ export function DictationDock({
           (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
         if (AudioCtx) {
           const audioCtx = new AudioCtx();
+          if (audioCtx.state === 'suspended') {
+            audioCtx.resume().catch(() => undefined);
+          }
           const source = audioCtx.createMediaStreamSource(stream);
           const analyser = audioCtx.createAnalyser();
           analyser.fftSize = 128;
@@ -261,8 +292,16 @@ export function DictationDock({
         // Optional waveform
       }
 
+      const appleSafari = isAppleSafariBrowser();
       const mimeType = pickSupportedRecorderMime();
-      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      let recorder: MediaRecorder;
+      try {
+        recorder = mimeType
+          ? new MediaRecorder(stream, { mimeType })
+          : new MediaRecorder(stream);
+      } catch {
+        recorder = new MediaRecorder(stream);
+      }
       mediaRecorderRef.current = recorder;
       chunksRef.current = [];
 
@@ -274,7 +313,12 @@ export function DictationDock({
 
       recorder.onstop = async () => {
         const recordedDuration = Math.max(1, (Date.now() - startTimeRef.current) / 1000);
-        const resolvedMime = recorder.mimeType || mimeType || 'audio/webm';
+        const firstChunkType = chunksRef.current.find((c) => c.type)?.type || '';
+        const resolvedMime =
+          recorder.mimeType ||
+          firstChunkType ||
+          mimeType ||
+          (appleSafari ? 'audio/mp4' : 'audio/webm');
         const blob = new Blob(chunksRef.current, { type: resolvedMime });
         chunksRef.current = [];
         stopWaveformAndTracks();
@@ -306,10 +350,19 @@ export function DictationDock({
         setErrorMessage('Recording encountered an audio error. Please try again.');
       };
 
-      // Continuous capture — never stops on silence until Stop Recording is clicked
+      // Continuous capture — never stops on silence until Stop Recording is clicked.
+      // Omit timeslice on MP4/AAC & Apple Safari so iOS emits a single complete, seekable MP4 container.
       startTimeRef.current = Date.now();
       setElapsedSeconds(0);
-      recorder.start(1000);
+      const isMp4OrApple =
+        appleSafari ||
+        (recorder.mimeType || mimeType).toLowerCase().includes('mp4') ||
+        (recorder.mimeType || mimeType).toLowerCase().includes('aac');
+      if (isMp4OrApple) {
+        recorder.start();
+      } else {
+        recorder.start(1000);
+      }
       setIsRecording(true);
 
       timerIntervalRef.current = window.setInterval(() => {
@@ -691,12 +744,12 @@ export function DictationDock({
             </div>
           </div>
         ) : (
-          /* Idle: Clean side-by-side action buttons */
+          /* Idle: Clean side-by-side touch-friendly action buttons */
           <div className="flex flex-wrap items-center gap-2.5">
             <button
               type="button"
               onClick={startRecording}
-              className="inline-flex items-center gap-2 whitespace-nowrap rounded-lg bg-[#4338CA] px-4 py-2 text-sm font-medium text-white transition-colors duration-150 hover:bg-[#3730A3] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA]"
+              className="inline-flex flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-lg bg-[#4338CA] px-4 py-2.5 text-sm font-medium text-white transition-colors duration-150 hover:bg-[#3730A3] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] sm:flex-initial sm:py-2"
             >
               <Mic className="h-4 w-4 shrink-0" />
               <span>Start Recording</span>
@@ -705,7 +758,7 @@ export function DictationDock({
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              className="inline-flex items-center gap-2 whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-4 py-2 text-sm font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA]"
+              className="inline-flex flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-4 py-2.5 text-sm font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] sm:flex-initial sm:py-2"
             >
               <Upload className="h-4 w-4 shrink-0" />
               <span>Upload Audio</span>

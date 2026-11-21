@@ -143,7 +143,7 @@ export function AuthGate({ children }: AuthGateProps) {
   // Prevent any flash of protected workspace while checking auth state
   if (status === 'checking') {
     return (
-      <div className="flex min-h-screen w-full flex-col items-center justify-center bg-white px-6 text-[#111827]">
+      <div className="safe-top safe-bottom flex min-h-[100dvh] w-full flex-col items-center justify-center bg-white px-6 text-[#111827]">
         <div className="flex flex-col items-center gap-3.5 text-center">
           <Loader2 className="h-6 w-6 animate-spin text-[#4338CA]" aria-hidden="true" />
           <p className="text-sm font-medium text-[#6B7280]">Checking workspace access…</p>
@@ -157,8 +157,8 @@ export function AuthGate({ children }: AuthGateProps) {
   }
 
   return (
-    <div className="flex min-h-screen w-full flex-col items-center justify-center bg-white px-6 py-12 text-[#111827]">
-      <div className="w-full max-w-[420px] rounded-2xl border border-[#E5E7EB] bg-white p-8 sm:p-10">
+    <div className="safe-top safe-bottom flex min-h-[100dvh] w-full flex-col items-center justify-center bg-white px-5 py-10 text-[#111827] sm:px-6 sm:py-12">
+      <div className="w-full max-w-[420px] rounded-2xl border border-[#E5E7EB] bg-white p-7 sm:p-10">
         <StudioBrandLockup />
 
         <div className="mt-5 text-center">

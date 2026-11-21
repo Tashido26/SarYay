@@ -175,9 +175,9 @@ export function SectionBlock({
                 onClick={() => onSelectVersion(section.id, activeVersionIndex - 1)}
                 aria-label="Previous version"
                 title="Previous version"
-                className="inline-flex h-5 w-5 items-center justify-center rounded-l-[5px] text-[#4B5563] transition-colors hover:bg-white hover:text-[#111827] disabled:cursor-not-allowed disabled:opacity-35"
+                className="inline-flex h-7 w-7 items-center justify-center rounded-l-[5px] text-[#4B5563] transition-colors hover:bg-white hover:text-[#111827] disabled:cursor-not-allowed disabled:opacity-35 sm:h-5 sm:w-5"
               >
-                <ChevronLeft className="h-3 w-3" />
+                <ChevronLeft className="h-3.5 w-3.5 sm:h-3 sm:w-3" />
               </button>
               <span
                 className="select-none px-1.5 text-[11px] font-medium text-[#111827]"
@@ -191,9 +191,9 @@ export function SectionBlock({
                 onClick={() => onSelectVersion(section.id, activeVersionIndex + 1)}
                 aria-label="Next version"
                 title="Next version"
-                className="inline-flex h-5 w-5 items-center justify-center rounded-r-[5px] text-[#4B5563] transition-colors hover:bg-white hover:text-[#111827] disabled:cursor-not-allowed disabled:opacity-35"
+                className="inline-flex h-7 w-7 items-center justify-center rounded-r-[5px] text-[#4B5563] transition-colors hover:bg-white hover:text-[#111827] disabled:cursor-not-allowed disabled:opacity-35 sm:h-5 sm:w-5"
               >
-                <ChevronRight className="h-3 w-3" />
+                <ChevronRight className="h-3.5 w-3.5 sm:h-3 sm:w-3" />
               </button>
             </div>
           )}
@@ -283,7 +283,8 @@ export function SectionBlock({
               ) : (
                 <>
                   <RefreshCw className="h-3.5 w-3.5" />
-                  <span>Re-process Style</span>
+                  <span className="sm:hidden">Re-process</span>
+                  <span className="hidden sm:inline">Re-process Style</span>
                   <ChevronDown className="h-3 w-3 opacity-75" />
                 </>
               )}
@@ -292,7 +293,7 @@ export function SectionBlock({
             {menuOpen && !isReprocessing && (
               <div
                 role="menu"
-                className="absolute right-0 z-20 mt-1.5 w-52 rounded-lg border border-[#E5E7EB] bg-white py-1 shadow-sm"
+                className="absolute left-1/2 z-20 mt-1.5 w-52 -translate-x-1/2 rounded-lg border border-[#E5E7EB] bg-white py-1 shadow-sm sm:left-auto sm:right-0 sm:translate-x-0"
               >
                 {REPROCESS_OPTIONS.map((opt) => {
                   const active = isCurrentOption(opt);

@@ -231,7 +231,7 @@ export function AudioPlayerBar({
         compact ? 'px-3 py-2' : 'px-4 py-3'
       }`}
     >
-      <audio ref={audioRef} src={resolvedUrl} preload="none" />
+      <audio ref={audioRef} src={resolvedUrl} preload="none" playsInline />
 
       <button
         type="button"
@@ -277,7 +277,7 @@ export function AudioPlayerBar({
           type="button"
           disabled={downloading}
           onClick={handleDownload}
-          className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border border-[#E5E7EB] bg-white px-3 py-1.5 text-xs font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:opacity-60"
+          className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border border-[#E5E7EB] bg-white px-2.5 py-1.5 text-xs font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:opacity-60 sm:px-3"
           title="Download audio backup locally"
         >
           {downloading ? (
@@ -285,7 +285,8 @@ export function AudioPlayerBar({
           ) : (
             <Download className="h-3.5 w-3.5" />
           )}
-          <span>Download Audio</span>
+          <span className="hidden sm:inline">Download Audio</span>
+          <span className="sm:hidden">Download</span>
         </button>
       </div>
     </div>

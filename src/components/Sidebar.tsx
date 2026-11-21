@@ -78,7 +78,7 @@ export function Sidebar({
   );
 
   const sidebarContent = (
-    <aside className="flex h-full w-[268px] flex-col border-r border-[#E5E7EB] bg-[#F8F9FA]">
+    <aside className="safe-top safe-bottom flex h-full w-[268px] flex-col border-r border-[#E5E7EB] bg-[#F8F9FA]">
       {/* Brand header */}
       <div className="flex h-14 shrink-0 items-center justify-between px-4">
         <div className="flex items-center gap-2.5">
@@ -167,7 +167,7 @@ export function Sidebar({
                     }}
                     onBlur={commitRename}
                     aria-label="Story title"
-                    className="min-w-0 flex-1 rounded border border-[#4338CA] bg-white px-2 py-1 text-sm text-[#111827] focus:outline-none"
+                    className="min-w-0 flex-1 rounded border border-[#4338CA] bg-white px-2 py-1 text-base text-[#111827] focus:outline-none lg:text-sm"
                   />
                   <button
                     type="button"
@@ -322,16 +322,29 @@ export function Sidebar({
         {isOpen && sidebarContent}
       </div>
 
-      {/* Mobile slide-over drawer */}
-      {isOpen && (
-        <div className="fixed inset-0 z-40 flex lg:hidden" role="dialog" aria-modal="true">
-          <div
-            className="fixed inset-0 bg-[#111827]/25 backdrop-blur-[1px]"
-            onClick={onCloseMobile}
-          />
-          <div className="relative z-10 h-full">{sidebarContent}</div>
+      {/* Mobile smooth slide-over drawer */}
+      <div
+        className={`fixed inset-0 z-40 flex transition-opacity duration-200 lg:hidden ${
+          isOpen ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0'
+        }`}
+        role="dialog"
+        aria-modal="true"
+        aria-hidden={!isOpen}
+      >
+        <div
+          className={`fixed inset-0 bg-[#111827]/25 backdrop-blur-[1px] transition-opacity duration-200 ${
+            isOpen ? 'opacity-100' : 'opacity-0'
+          }`}
+          onClick={onCloseMobile}
+        />
+        <div
+          className={`relative z-10 h-full transition-transform duration-200 ease-out will-change-transform ${
+            isOpen ? 'translate-x-0' : '-translate-x-full'
+          }`}
+        >
+          {sidebarContent}
         </div>
-      )}
+      </div>
     </>
   );
 }
