@@ -38,6 +38,7 @@ import {
   getPendingDraftAudio,
   savePendingDraftAudio,
 } from '../lib/audioDb.ts';
+import { formatCloudErrorMessage } from '../lib/cloudStore.ts';
 import { AudioPlayerBar } from './AudioPlayerBar.tsx';
 
 interface WakeLockSentinelLike {
@@ -621,7 +622,7 @@ export function DictationDock({
         setErrorMessage('Canceled. Your audio is still backed up locally below.');
       } else {
         setHasFailedAttempt(true);
-        const msg = err instanceof Error ? err.message : 'Transcription failed. Please try again.';
+        const msg = err instanceof Error ? formatCloudErrorMessage(err) : 'Transcription failed. Please try again.';
         setErrorMessage(msg);
       }
     } finally {
