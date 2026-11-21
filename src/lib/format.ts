@@ -1,5 +1,4 @@
-import type { StorySession } from '../types.ts';
-import { STYLE_LABELS } from '../types.ts';
+import type { ManuscriptSection, StorySession } from '../types.ts';
 
 export function formatDuration(totalSeconds: number): string {
   if (!Number.isFinite(totalSeconds) || totalSeconds < 0) return '00:00';
@@ -141,8 +140,25 @@ export function triggerBlobDownload(blob: Blob, filename: string): void {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+export function sortSectionsChronologically(
+  sections: ManuscriptSection[],
+): ManuscriptSection[] {
+  return sections
+    .map((section, index) => ({ section, index }))
+    .sort((a, b) => {
+      const timeA = Date.parse(a.section.createdAt);
+      const timeB = Date.parse(b.section.createdAt);
+      if (Number.isFinite(timeA) && Number.isFinite(timeB) && timeA !== timeB) {
+        return timeA - timeB;
+      }
+      return a.index - b.index;
+    })
+    .map((entry) => entry.section);
+}
+
 export function compileFullStoryPlainText(session: StorySession): string {
-  const body = session.sections
+  const ordered = sortSectionsChronologically(session.sections);
+  const body = ordered
     .map((s) => s.content.trim())
     .filter(Boolean)
     .join('\n\n');
@@ -152,17 +168,14 @@ export function compileFullStoryPlainText(session: StorySession): string {
 
 export function compileFullStoryMarkdown(session: StorySession): string {
   const title = session.title.trim() || 'Untitled Story';
-  const sections = session.sections
-    .filter((s) => s.content.trim().length > 0)
-    .map((section, idx) => {
-      const modeTag = section.mode === 'summarize_structure' ? ' · Structured Summary' : '';
-      const heading = `## Section ${String(idx + 1).padStart(2, '0')} (${STYLE_LABELS[section.style]}${modeTag})`;
-      return `${heading}\n\n${section.content.trim()}`;
-    })
-    .join('\n\n---\n\n');
+  const ordered = sortSectionsChronologically(session.sections);
+  const body = ordered
+    .map((section) => section.content.trim())
+    .filter(Boolean)
+    .join('\n\n');
 
-  if (!sections) return `# ${title}\n`;
-  return `# ${title}\n\n${sections}\n`;
+  if (!body) return `# ${title}\n`;
+  return `# ${title}\n\n${body}\n`;
 }
 
 export function safeExportFilename(title: string, extension: 'txt' | 'md'): string {
@@ -170,8 +183,9 @@ export function safeExportFilename(title: string, extension: 'txt' | 'md'): stri
     .trim()
     .replace(/[\\/:*?"<>|]+/g, '')
     .replace(/\s+/g, '-')
-    .slice(0, 60);
-  return `${cleaned || 'untitled-story'}.${extension}`;
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+  return `${cleaned || 'Untitled-Story'}.${extension}`;
 }
 
 export function countCharacters(text: string): number {

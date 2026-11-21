@@ -27,6 +27,7 @@ import {
   compileFullStoryPlainText,
   countCharacters,
   safeExportFilename,
+  sortSectionsChronologically,
   triggerBlobDownload,
 } from './lib/format.ts';
 import {
@@ -364,12 +365,17 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     showToast('Exported as .md');
   };
 
-  const totalCharacters = useMemo(
-    () => activeSession.sections.reduce((acc, s) => acc + countCharacters(s.content), 0),
+  const orderedSections = useMemo(
+    () => sortSectionsChronologically(activeSession.sections),
     [activeSession.sections],
   );
 
-  const hasContent = activeSession.sections.some((s) => s.content.trim().length > 0);
+  const totalCharacters = useMemo(
+    () => orderedSections.reduce((acc, s) => acc + countCharacters(s.content), 0),
+    [orderedSections],
+  );
+
+  const hasContent = orderedSections.some((s) => s.content.trim().length > 0);
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-white text-[#111827]">
@@ -475,11 +481,12 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
               type="button"
               disabled={!hasContent}
               onClick={handleExportMd}
-              title="Export full story as Markdown (.md)"
+              title="Export full session sequentially as Markdown (.md)"
               className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-3 py-1.5 text-xs font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-not-allowed disabled:opacity-45"
             >
               <FileDown className="h-3.5 w-3.5" />
-              <span>.md</span>
+              <span className="hidden sm:inline">Export as .md</span>
+              <span className="sm:hidden">.md</span>
             </button>
 
             {!sidebarOpen && (
@@ -554,10 +561,10 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
               </div>
             )}
 
-            {/* Manuscript Sections Stream */}
-            {activeSession.sections.length > 0 && (
+            {/* Manuscript Sections Stream (oldest to newest as spoken) */}
+            {orderedSections.length > 0 && (
               <div className="mb-10 space-y-6">
-                {activeSession.sections.map((section, idx) => (
+                {orderedSections.map((section, idx) => (
                   <SectionBlock
                     key={section.id}
                     section={section}
