@@ -525,7 +525,6 @@ export function subscribeToSections(
     collection(db, path),
     where('ownerId', '==', uid),
     where('storyId', '==', storyId),
-    where('isDeleted', '==', false),
   );
 
   return onSnapshot(
@@ -533,6 +532,7 @@ export function subscribeToSections(
     (snapshot) => {
       const sections = snapshot.docs
         .map((docSnap) => parseSectionDoc(docSnap.id, docSnap.data()))
+        .filter((sec) => sec.isDeleted !== true)
         .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
       onData(sections);
     },
@@ -582,11 +582,11 @@ export async function fetchStorySectionsOnce(
       collection(db, path),
       where('ownerId', '==', uid),
       where('storyId', '==', storyId),
-      where('isDeleted', '==', false),
     );
     const snap = await getDocs(q);
     return snap.docs
       .map((docSnap) => parseSectionDoc(docSnap.id, docSnap.data()))
+      .filter((sec) => sec.isDeleted !== true)
       .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, path);

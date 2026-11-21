@@ -8,12 +8,17 @@
 
 @layer base {
   html,
+  body,
+  #root {
+    background-color: #ffffff;
+    overscroll-behavior-y: none;
+  }
+
+  html,
   body {
     font-family: var(--font-sans);
-    background-color: #ffffff;
     color: #111827;
     overflow-x: hidden;
-    overscroll-behavior-y: none;
     -webkit-text-size-adjust: 100%;
     -webkit-tap-highlight-color: transparent;
   }
@@ -23,6 +28,16 @@
   label[for] {
     cursor: pointer;
   }
+}
+
+/* Force crisp, opaque GPU compositing layer on iOS WebKit PWA headers */
+.ios-crisp-header {
+  background-color: #ffffff;
+  transform: translateZ(0);
+  -webkit-transform: translateZ(0);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  isolation: isolate;
 }
 
 /* iOS Dynamic Island / Notch & Home Indicator safe-area helpers */

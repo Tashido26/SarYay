@@ -11,7 +11,6 @@ import {
   X,
 } from 'lucide-react';
 import type { StorySession } from '../types.ts';
-import { STYLE_SHORT_LABELS } from '../types.ts';
 import { formatTimestamp } from '../lib/format.ts';
 import { BRAND_LOGO_URL } from '../lib/brand.ts';
 
@@ -206,7 +205,6 @@ export function Sidebar({
             session.id === activeSessionId
               ? activeSectionCount
               : (session.sectionCount ?? session.sections.length);
-          const styleShort = STYLE_SHORT_LABELS[session.defaultStyle] ?? 'Colloquial';
 
           return (
             <div
@@ -243,58 +241,69 @@ export function Sidebar({
                   </button>
                 </div>
               ) : (
-                <div className="flex items-start justify-between gap-1 px-3 py-2.5">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onSelectSession(session.id);
-                      onCloseMobile();
-                    }}
-                    className="min-w-0 flex-1 text-left focus-visible:outline-none"
-                  >
-                    <div
-                      className={`truncate text-sm font-medium ${
+                <div
+                  onClick={() => {
+                    onSelectSession(session.id);
+                    onCloseMobile();
+                  }}
+                  className="cursor-pointer px-3 py-2.5"
+                >
+                  {/* Top row: truncated title on left, compact Edit & Delete icons on right */}
+                  <div className="flex items-center justify-between gap-1.5">
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onSelectSession(session.id);
+                        onCloseMobile();
+                      }}
+                      title={session.title || 'Untitled Story'}
+                      className={`min-w-0 flex-1 truncate text-ellipsis text-left text-sm font-medium leading-5 focus-visible:outline-none ${
                         isActive ? 'text-[#312E81]' : 'text-[#111827]'
                       }`}
                     >
                       {session.title || 'Untitled Story'}
-                    </div>
-                    <div className="mt-1 flex items-center gap-1.5 text-[11px] text-[#6B7280] tabular-nums">
-                      <span>
-                        {sectionCount} {sectionCount === 1 ? 'section' : 'sections'}
-                      </span>
-                      <span aria-hidden="true">·</span>
-                      <span>{styleShort}</span>
-                      <span aria-hidden="true">·</span>
-                      <span>{formatTimestamp(session.updatedAt)}</span>
-                    </div>
-                  </button>
+                    </button>
 
-                  <div className="flex shrink-0 items-center gap-0.5 opacity-100 transition-opacity duration-150 lg:opacity-0 lg:group-hover:opacity-100 lg:group-focus-within:opacity-100">
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        startRename(session);
-                      }}
-                      aria-label={`Rename ${session.title}`}
-                      title="Rename story"
-                      className="flex h-7 w-7 items-center justify-center rounded text-[#6B7280] transition-colors hover:bg-[#E5E7EB]/70 hover:text-[#111827]"
-                    >
-                      <Pencil className="h-3.5 w-3.5" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onDeleteSession(session.id);
-                      }}
-                      aria-label={`Move ${session.title} to Trash`}
-                      title="Move story to Trash"
-                      className="flex h-7 w-7 items-center justify-center rounded text-[#6B7280] transition-colors hover:bg-[#FEE2E2] hover:text-[#DC2626]"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
+                    <div className="flex shrink-0 items-center gap-0.5 opacity-100 transition-opacity duration-150 lg:opacity-0 lg:group-hover:opacity-100 lg:group-focus-within:opacity-100">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          startRename(session);
+                        }}
+                        aria-label={`Rename ${session.title}`}
+                        title="Rename story"
+                        className="flex h-7 w-7 items-center justify-center rounded text-[#6B7280] transition-colors hover:bg-[#E5E7EB]/70 hover:text-[#111827] lg:h-6 lg:w-6"
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onDeleteSession(session.id);
+                        }}
+                        aria-label={`Move ${session.title} to Trash`}
+                        title="Move story to Trash"
+                        className="flex h-7 w-7 items-center justify-center rounded text-[#6B7280] transition-colors hover:bg-[#FEE2E2] hover:text-[#DC2626] lg:h-6 lg:w-6"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Bottom row: single-line section count & timestamp */}
+                  <div className="mt-1 flex items-center gap-1.5 overflow-hidden whitespace-nowrap text-[11px] leading-4 text-[#6B7280] tabular-nums">
+                    <span className="shrink-0 whitespace-nowrap">
+                      {sectionCount} {sectionCount === 1 ? 'section' : 'sections'}
+                    </span>
+                    <span className="shrink-0 text-[#9CA3AF]" aria-hidden="true">
+                      ·
+                    </span>
+                    <span className="truncate whitespace-nowrap">
+                      {formatTimestamp(session.updatedAt)}
+                    </span>
                   </div>
                 </div>
               )}
@@ -387,15 +396,17 @@ export function Sidebar({
 
       {/* Mobile smooth slide-over drawer */}
       <div
-        className={`fixed inset-0 z-40 flex transition-opacity duration-200 lg:hidden ${
-          isOpen ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0'
+        className={`fixed inset-0 z-40 flex transition-[opacity,visibility] duration-200 lg:hidden ${
+          isOpen
+            ? 'pointer-events-auto visible opacity-100'
+            : 'pointer-events-none invisible opacity-0'
         }`}
         role="dialog"
         aria-modal="true"
         aria-hidden={!isOpen}
       >
         <div
-          className={`fixed inset-0 bg-[#111827]/25 backdrop-blur-[1px] transition-opacity duration-200 ${
+          className={`fixed inset-0 bg-[#111827]/25 transition-opacity duration-200 ${
             isOpen ? 'opacity-100' : 'opacity-0'
           }`}
           onClick={onCloseMobile}

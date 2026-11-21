@@ -6,7 +6,6 @@ import {
   Check,
   ChevronDown,
   Cloud,
-  CloudUpload,
   Copy,
   FileDown,
   FileText,
@@ -41,7 +40,6 @@ import {
   appendSectionVersionInCloud,
   createSectionInCloud,
   createStoryInCloud,
-  deleteSectionAudioFile,
   downloadSectionAudioBlob,
   fetchOlderStoriesPage,
   formatCloudErrorMessage,
@@ -64,7 +62,6 @@ import {
   updateStoryModelInCloud,
   updateStoryRefinedEndingInCloud,
   updateStoryStyleInCloud,
-  uploadSectionAudio,
   type StoryCursor,
 } from './lib/cloudStore.ts';
 import {
@@ -166,7 +163,6 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   const [pendingSyncOps, setPendingSyncOps] = useState(0);
   const [isManualSyncing, setIsManualSyncing] = useState(false);
   const [syncPulseState, setSyncPulseState] = useState<'idle' | 'synced' | 'offline'>('idle');
-  const [isUploadingAudio, setIsUploadingAudio] = useState(false);
   const [reprocessingSectionId, setReprocessingSectionId] = useState<string | null>(null);
   const reprocessingSectionIdRef = useRef<string | null>(null);
   const [trashBusyItemId, setTrashBusyItemId] = useState<string | null>(null);
@@ -1083,6 +1079,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     });
 
     const sectionId = createId('sec');
+    const audioId = createId('audio');
     const audioMeta = {
       filename: staged.filename,
       mimeType: staged.mimeType,
@@ -1090,34 +1087,10 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       sizeBytes: staged.sizeBytes,
     };
 
-    // 2. Upload original audio to Firebase Storage
-    let audioUrl: string | undefined;
-    let storagePath: string | undefined;
-    let fallbackAudioId: string | undefined;
+    // 2. Store original audio strictly locally on this device (IndexedDB) — no Firebase Storage upload
+    await saveAudioClip(audioId, staged.blob, audioMeta);
 
-    setIsUploadingAudio(true);
-    try {
-      const uploaded = await uploadSectionAudio({
-        uid,
-        storyId: targetStoryId,
-        sectionId,
-        blob: staged.blob,
-        mimeType: staged.mimeType,
-        filename: staged.filename,
-      });
-      audioUrl = uploaded.audioUrl;
-      storagePath = uploaded.storagePath;
-    } catch (uploadErr) {
-      fallbackAudioId = createId('audio');
-      await saveAudioClip(fallbackAudioId, staged.blob, audioMeta).catch(() => undefined);
-      setGlobalError(
-        `Text synced to Firestore, but Firebase Storage audio upload failed (${formatCloudErrorMessage(uploadErr)}). A temporary local backup was saved on this device.`,
-      );
-    } finally {
-      setIsUploadingAudio(false);
-    }
-
-    // 3. Save section + initial version history + token usage in Cloud Firestore
+    // 3. Immediately save transcribed section + version history + token usage to Cloud Firestore
     const now = new Date().toISOString();
     const initialVersion: SectionVersion = {
       id: createId('ver'),
@@ -1137,18 +1110,13 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
           sectionId,
           order: Date.now(),
           initialVersion,
-          audioUrl,
-          storagePath,
-          audioId: fallbackAudioId,
+          audioId,
           audioMeta,
           nextSectionCount,
         }),
       );
     } catch (cloudErr) {
-      // Clean up newly uploaded Storage file if Firestore write fails so no orphan audio remains
-      if (storagePath) {
-        await deleteSectionAudioFile(storagePath).catch(() => undefined);
-      }
+      await deleteAudioClip(audioId).catch(() => undefined);
       throw cloudErr;
     }
 
@@ -1284,7 +1252,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
 
           if (!usedAudio) {
             throw new Error(
-              'Original audio clip could not be loaded from cloud storage. Try restyling from text instead.',
+              'Original audio clip is not stored on this device. Try restyling from text instead.',
             );
           }
         } else {
@@ -1545,7 +1513,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       {/* Main editorial column */}
       <div className="flex min-w-0 flex-1 flex-col bg-white">
         {/* Top document utility bar (safe-top clears iPhone Dynamic Island / status bar) */}
-        <header className="safe-top shrink-0 border-b border-[#E5E7EB] bg-white">
+        <header className="safe-top ios-crisp-header relative z-20 shrink-0 border-b border-gray-200 bg-white">
           <div className="flex h-14 items-center justify-between gap-2 px-3 sm:gap-3 sm:px-6">
             <div className="flex min-w-0 flex-1 items-center gap-1.5 sm:gap-2.5">
               <div className="flex shrink-0 items-center gap-0.5">
@@ -1609,31 +1577,24 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                       : 'SarYay'}
                 </span>
 
-                {/* Minimal Cloud Sync / Upload Indicator + Subtle Synced Pulse */}
+                {/* Minimal Cloud Sync Indicator + Subtle Synced Pulse */}
                 <span
                   className={`ml-0.5 shrink-0 items-center gap-1 text-[11px] transition-colors duration-200 ${
                     syncPulseState !== 'idle' || isManualSyncing
                       ? 'inline-flex'
                       : 'hidden sm:inline-flex'
                   } ${
-                    isUploadingAudio
-                      ? 'font-medium text-[#4338CA]'
-                      : syncPulseState === 'synced'
-                        ? 'font-medium text-[#16A34A]'
-                        : syncPulseState === 'offline'
-                          ? 'font-medium text-[#D97706]'
-                          : isSyncing
-                            ? 'text-[#6B7280]'
-                            : 'text-[#9CA3AF]'
+                    syncPulseState === 'synced'
+                      ? 'font-medium text-[#16A34A]'
+                      : syncPulseState === 'offline'
+                        ? 'font-medium text-[#D97706]'
+                        : isSyncing
+                          ? 'text-[#6B7280]'
+                          : 'text-[#9CA3AF]'
                   }`}
                   aria-live="polite"
                 >
-                  {isUploadingAudio ? (
-                    <>
-                      <CloudUpload className="h-3.5 w-3.5 animate-pulse" />
-                      <span>Uploading audio…</span>
-                    </>
-                  ) : isSyncing ? (
+                  {isSyncing ? (
                     <>
                       <Loader2 className="h-3 w-3 animate-spin" />
                       <span>Syncing…</span>
@@ -1894,10 +1855,10 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                       </span>
                     </>
                   )}
-                  {(isUploadingAudio || isSyncing) && (
+                  {isSyncing && (
                     <span className="inline-flex items-center gap-1 text-[#4338CA] sm:hidden">
                       <span aria-hidden="true">·</span>
-                      <span>{isUploadingAudio ? 'Uploading audio…' : 'Syncing…'}</span>
+                      <span>Syncing…</span>
                     </span>
                   )}
                 </div>
