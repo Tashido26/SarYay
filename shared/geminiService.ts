@@ -8,12 +8,67 @@ export type VoiceEnding = 'colloquial' | 'literary';
 export type GeminiModel = 'gemini-2.5-flash' | 'gemini-2.5-pro';
 export type ProcessingMode = 'full_polish' | 'summarize_structure';
 
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: number;
+}
+
 export const ALLOWED_MODELS = new Set<GeminiModel>(['gemini-2.5-flash', 'gemini-2.5-pro']);
 export const ALLOWED_STYLES = new Set<WritingStyle>(['colloquial', 'literary', 'refined_flow']);
 export const ALLOWED_ENDINGS = new Set<VoiceEnding>(['colloquial', 'literary']);
 export const ALLOWED_MODES = new Set<ProcessingMode>(['full_polish', 'summarize_structure']);
 export const INLINE_AUDIO_LIMIT_BYTES = 15 * 1024 * 1024; // 15 MB
 export const MAX_UPLOAD_BYTES = 60 * 1024 * 1024; // 60 MB
+
+function computeTokenUsage(
+  usageMetadata:
+    | {
+        promptTokenCount?: number;
+        candidatesTokenCount?: number;
+        totalTokenCount?: number;
+      }
+    | undefined,
+  model: GeminiModel,
+  inputKind: 'audio' | 'text',
+): TokenUsage | undefined {
+  if (!usageMetadata) return undefined;
+  const inputTokens = Math.max(0, Math.round(usageMetadata.promptTokenCount ?? 0));
+  const outputTokens = Math.max(0, Math.round(usageMetadata.candidatesTokenCount ?? 0));
+  const rawTotal = Math.max(0, Math.round(usageMetadata.totalTokenCount ?? 0));
+  const totalTokens = rawTotal > 0 ? rawTotal : inputTokens + outputTokens;
+
+  if (inputTokens === 0 && outputTokens === 0 && totalTokens === 0) {
+    return undefined;
+  }
+
+  let inputRatePerMillion = 0.3;
+  let outputRatePerMillion = 2.5;
+
+  if (model === 'gemini-2.5-pro') {
+    inputRatePerMillion = 1.25;
+    outputRatePerMillion = 10.0;
+  } else {
+    // gemini-2.5-flash: $1.00 / 1M audio input, $0.30 / 1M text input, $2.50 / 1M output
+    inputRatePerMillion = inputKind === 'audio' ? 1.0 : 0.3;
+    outputRatePerMillion = 2.5;
+  }
+
+  const estimatedCostUsd = Number(
+    (
+      (inputTokens / 1_000_000) * inputRatePerMillion +
+      (outputTokens / 1_000_000) * outputRatePerMillion
+    ).toFixed(6),
+  );
+
+  return {
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    estimatedCostUsd,
+  };
+}
 
 function getGeminiClient(): GoogleGenAI {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -336,6 +391,7 @@ export async function transcribeAudioBuffer(params: {
   refinedEnding?: VoiceEnding;
   model: GeminiModel;
   mode: ProcessingMode;
+  usage?: TokenUsage;
 }> {
   if (!params.buffer || params.buffer.length === 0) {
     throw Object.assign(
@@ -382,6 +438,7 @@ export async function transcribeAudioBuffer(params: {
 
   try {
     let responseText = '';
+    let usage: TokenUsage | undefined;
 
     if (params.buffer.length <= INLINE_AUDIO_LIMIT_BYTES) {
       const audioPart = {
@@ -404,6 +461,7 @@ export async function transcribeAudioBuffer(params: {
       );
 
       responseText = (response.text ?? '').trim();
+      usage = computeTokenUsage(response.usageMetadata, params.model, 'audio');
     } else {
       const ext = path.extname(params.filename || '') || '.webm';
       tempFilePath = path.join(
@@ -429,6 +487,7 @@ export async function transcribeAudioBuffer(params: {
       );
 
       responseText = (response.text ?? '').trim();
+      usage = computeTokenUsage(response.usageMetadata, params.model, 'audio');
     }
 
     if (!responseText) {
@@ -446,6 +505,7 @@ export async function transcribeAudioBuffer(params: {
       refinedEnding: params.style === 'refined_flow' ? resolvedEnding : undefined,
       model: params.model,
       mode: params.mode,
+      usage,
     };
   } finally {
     if (uploadedFileName) {
@@ -477,6 +537,7 @@ export async function restyleTextContent(params: {
   refinedEnding?: VoiceEnding;
   model: GeminiModel;
   mode: ProcessingMode;
+  usage?: TokenUsage;
 }> {
   const cleanedText = params.text.trim();
   if (!cleanedText) {
@@ -524,11 +585,14 @@ export async function restyleTextContent(params: {
     });
   }
 
+  const usage = computeTokenUsage(response.usageMetadata, params.model, 'text');
+
   return {
     text: polished,
     style: params.style,
     refinedEnding: params.style === 'refined_flow' ? resolvedEnding : undefined,
     model: params.model,
     mode: params.mode,
+    usage,
   };
 }

@@ -1,4 +1,10 @@
-import type { GeminiModel, ProcessingMode, VoiceEnding, WritingStyle } from '../types.ts';
+import type {
+  GeminiModel,
+  ProcessingMode,
+  TokenUsage,
+  VoiceEnding,
+  WritingStyle,
+} from '../types.ts';
 import { getAuthIdToken } from './firebase.ts';
 
 export interface TranscribeResponse {
@@ -7,6 +13,7 @@ export interface TranscribeResponse {
   refinedEnding?: VoiceEnding;
   model: GeminiModel;
   mode?: ProcessingMode;
+  usage?: TokenUsage;
 }
 
 async function parseErrorResponse(res: Response): Promise<string> {

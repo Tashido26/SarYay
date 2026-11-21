@@ -20,6 +20,7 @@ import type {
   SectionVersion,
   StagedAudio,
   StorySession,
+  TrashedSection,
   VoiceEnding,
   WritingStyle,
 } from './types.ts';
@@ -35,14 +36,20 @@ import {
   appendSectionVersionInCloud,
   createSectionInCloud,
   createStoryInCloud,
-  deleteSectionInCloud,
-  deleteStoryInCloud,
   downloadSectionAudioBlob,
   formatCloudErrorMessage,
+  moveSectionToTrashInCloud,
+  moveStoryToTrashInCloud,
+  permanentlyDeleteSectionFromTrashInCloud,
+  permanentlyDeleteStoryInCloud,
+  purgeExpiredTrashInCloud,
   renameStoryInCloud,
+  restoreSectionFromTrashInCloud,
+  restoreStoryFromTrashInCloud,
   selectSectionVersionInCloud,
   subscribeToSections,
   subscribeToStories,
+  subscribeToTrashedSections,
   updateSectionContentInCloud,
   updateStoryModelInCloud,
   updateStoryRefinedEndingInCloud,
@@ -53,6 +60,7 @@ import {
   compileFullStoryMarkdown,
   compileFullStoryPlainText,
   countCharacters,
+  formatSessionTokenSummary,
   safeExportFilename,
   sortSectionsChronologically,
   triggerBlobDownload,
@@ -68,9 +76,18 @@ import { Sidebar } from './components/Sidebar.tsx';
 import { DictationDock } from './components/DictationDock.tsx';
 import { SectionBlock } from './components/SectionBlock.tsx';
 import { AuthGate } from './components/AuthGate.tsx';
+import { ConfirmDialog } from './components/ConfirmDialog.tsx';
+import { TrashBinView } from './components/TrashBinView.tsx';
+import { BRAND_LOGO_URL } from './lib/brand.ts';
 
 const LEGACY_SESSIONS_KEY = 'sarpay_studio_sessions_v1';
 const MIGRATED_FLAG_KEY = 'sarpay_studio_cloud_migrated_v1';
+
+type PendingConfirmAction =
+  | { kind: 'trash_story'; story: StorySession }
+  | { kind: 'trash_section'; section: ManuscriptSection }
+  | { kind: 'delete_story_forever'; story: StorySession }
+  | { kind: 'delete_section_forever'; section: TrashedSection };
 
 export default function App() {
   return (
@@ -88,8 +105,12 @@ interface StudioWorkspaceProps {
 function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   const uid = user.uid;
 
-  const [stories, setStories] = useState<StorySession[]>([]);
+  const [allStories, setAllStories] = useState<StorySession[]>([]);
   const [storiesLoaded, setStoriesLoaded] = useState(false);
+  const [trashedSections, setTrashedSections] = useState<TrashedSection[]>([]);
+  const [trashedSectionsLoaded, setTrashedSectionsLoaded] = useState(false);
+
+  const [activeView, setActiveView] = useState<'story' | 'trash'>('story');
   const [activeSessionId, setActiveSessionId] = useState<string>(() => loadActiveSessionId(''));
   const [sections, setSections] = useState<ManuscriptSection[]>([]);
   const [sectionsLoaded, setSectionsLoaded] = useState(false);
@@ -114,12 +135,33 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   const [pendingSyncOps, setPendingSyncOps] = useState(0);
   const [isUploadingAudio, setIsUploadingAudio] = useState(false);
   const [reprocessingSectionId, setReprocessingSectionId] = useState<string | null>(null);
+  const [trashBusyItemId, setTrashBusyItemId] = useState<string | null>(null);
+  const [pendingConfirm, setPendingConfirm] = useState<PendingConfirmAction | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
   const [globalError, setGlobalError] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [copiedFull, setCopiedFull] = useState(false);
 
   const toastTimeoutRef = useRef<number | null>(null);
   const bootstrappedRef = useRef<boolean>(false);
+  const initialPurgeRanRef = useRef<boolean>(false);
+
+  const activeStories = useMemo(
+    () => allStories.filter((s) => !s.isDeleted),
+    [allStories],
+  );
+  const trashedStories = useMemo(
+    () =>
+      allStories
+        .filter((s) => s.isDeleted)
+        .sort(
+          (a, b) =>
+            Date.parse(b.deletedAt || b.updatedAt) - Date.parse(a.deletedAt || a.updatedAt),
+        ),
+    [allStories],
+  );
+
+  const trashCount = trashedStories.length + trashedSections.length;
 
   const showToast = useCallback((message: string) => {
     setToastMessage(message);
@@ -140,7 +182,6 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     }
   }, []);
 
-  // Keep refs updated
   useEffect(() => {
     sectionsRef.current = sections;
   }, [sections]);
@@ -178,19 +219,21 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   // Real-time Firestore listener for all stories under users/{uid}/stories
   useEffect(() => {
     bootstrappedRef.current = false;
+    initialPurgeRanRef.current = false;
     setStoriesLoaded(false);
 
     const unsubscribe = subscribeToStories(
       uid,
       async (cloudStories) => {
-        setStories(cloudStories);
+        setAllStories(cloudStories);
         setStoriesLoaded(true);
+
+        const nonDeleted = cloudStories.filter((s) => !s.isDeleted);
 
         if (cloudStories.length === 0 && !bootstrappedRef.current) {
           bootstrappedRef.current = true;
           try {
             await trackSync(async () => {
-              // One-time import of existing localStorage stories if present and not yet migrated
               let imported = false;
               try {
                 const alreadyMigrated = localStorage.getItem(MIGRATED_FLAG_KEY) === 'true';
@@ -216,7 +259,9 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                         defaultModel: legacyStory.defaultModel || 'gemini-2.5-flash',
                       });
 
-                      const legacySections = sortSectionsChronologically(legacyStory.sections || []);
+                      const legacySections = sortSectionsChronologically(
+                        legacyStory.sections || [],
+                      );
                       let secCount = 0;
                       for (let i = 0; i < legacySections.length; i++) {
                         const sec = legacySections[i];
@@ -264,13 +309,15 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
           return;
         }
 
-        if (cloudStories.length > 0) {
+        if (nonDeleted.length > 0) {
           setActiveSessionId((prevId) => {
-            if (prevId && cloudStories.some((s) => s.id === prevId)) {
+            if (prevId && nonDeleted.some((s) => s.id === prevId)) {
               return prevId;
             }
-            return cloudStories[0].id;
+            return nonDeleted[0].id;
           });
+        } else {
+          setActiveSessionId('');
         }
       },
       (err) => {
@@ -282,7 +329,51 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     return () => unsubscribe();
   }, [uid, showToast, trackSync]);
 
-  // Real-time Firestore listener for active story's sections
+  // Real-time Firestore listener for individually trashed sections under users/{uid}/trashedSections
+  useEffect(() => {
+    setTrashedSectionsLoaded(false);
+    const unsubscribe = subscribeToTrashedSections(
+      uid,
+      (items) => {
+        setTrashedSections(items);
+        setTrashedSectionsLoaded(true);
+      },
+      (err) => {
+        setTrashedSectionsLoaded(true);
+        setGlobalError(formatCloudErrorMessage(err));
+      },
+    );
+    return () => unsubscribe();
+  }, [uid]);
+
+  // Automatic 30-day permanent cleanup helper
+  const runExpiredTrashCleanup = useCallback(async () => {
+    if (trashedStories.length === 0 && trashedSections.length === 0) return;
+    const allIds = new Set(allStories.map((s) => s.id));
+    const purged = await purgeExpiredTrashInCloud(uid, trashedStories, trashedSections, allIds);
+    if (purged > 0) {
+      showToast(
+        `Auto-cleaned ${purged} expired Trash ${purged === 1 ? 'item' : 'items'} (> 30 days)`,
+      );
+    }
+  }, [uid, allStories, trashedStories, trashedSections, showToast]);
+
+  // Run automatic 30-day cleanup on initial app load once Trash data arrives
+  useEffect(() => {
+    if (!storiesLoaded || !trashedSectionsLoaded) return;
+    if (initialPurgeRanRef.current) return;
+    initialPurgeRanRef.current = true;
+    void runExpiredTrashCleanup();
+  }, [storiesLoaded, trashedSectionsLoaded, runExpiredTrashCleanup]);
+
+  // Also run automatic 30-day cleanup whenever the user opens the Trash view
+  useEffect(() => {
+    if (activeView === 'trash' && storiesLoaded && trashedSectionsLoaded) {
+      void runExpiredTrashCleanup();
+    }
+  }, [activeView, storiesLoaded, trashedSectionsLoaded, runExpiredTrashCleanup]);
+
+  // Real-time Firestore listener for active story's active (non-deleted) sections
   useEffect(() => {
     if (!activeSessionId) {
       setSections([]);
@@ -291,7 +382,6 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     }
 
     setSectionsLoaded(false);
-    // Clear stale local drafts when switching stories
     for (const timerId of Object.values(sectionDebounceRefs.current)) {
       window.clearTimeout(timerId);
     }
@@ -315,8 +405,8 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   }, [uid, activeSessionId]);
 
   const activeSession = useMemo(
-    () => stories.find((s) => s.id === activeSessionId) ?? stories[0] ?? null,
-    [stories, activeSessionId],
+    () => activeStories.find((s) => s.id === activeSessionId) ?? activeStories[0] ?? null,
+    [activeStories, activeSessionId],
   );
 
   // Sync local title input with remote Firestore title when not actively editing
@@ -347,6 +437,22 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     });
   }, [sections, sectionDrafts]);
 
+  // Cumulative token usage & estimated USD cost across all versions of active sections in this story
+  const sessionTokenStats = useMemo(() => {
+    let totalTokens = 0;
+    let totalCostUsd = 0;
+    for (const sec of orderedSections) {
+      const versions = getSectionVersions(sec);
+      for (const ver of versions) {
+        if (ver.usage) {
+          totalTokens += ver.usage.totalTokens || 0;
+          totalCostUsd += ver.usage.estimatedCostUsd || 0;
+        }
+      }
+    }
+    return { totalTokens, totalCostUsd };
+  }, [orderedSections]);
+
   const flushSectionDraft = useCallback(
     async (sectionId: string) => {
       const pendingTimer = sectionDebounceRefs.current[sectionId];
@@ -368,7 +474,6 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
         idx === activeIdx ? { ...v, text: draftText, timestamp: now } : v,
       );
 
-      // Clear draft buffer once write starts (optimistically keep latest in Firestore snapshot)
       setSectionDrafts((prev) => {
         if (prev[sectionId] !== draftText) return prev;
         const copy = { ...prev };
@@ -402,6 +507,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       );
       titleDirtyRef.current = false;
       setActiveSessionId(freshId);
+      setActiveView('story');
     } catch (err) {
       setGlobalError(formatCloudErrorMessage(err));
     }
@@ -447,13 +553,98 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     }
   };
 
-  const handleDeleteSession = async (id: string) => {
+  // Mandatory confirmation triggers (never delete immediately!)
+  const handleRequestTrashStory = (storyId: string) => {
+    const story = activeStories.find((s) => s.id === storyId);
+    if (!story) return;
+    setPendingConfirm({ kind: 'trash_story', story });
+  };
+
+  const handleRequestTrashSection = (sectionId: string) => {
+    const section = sectionsRef.current.find((s) => s.id === sectionId);
+    if (!section) return;
+    setPendingConfirm({ kind: 'trash_section', section });
+  };
+
+  const handleConfirmAction = async () => {
+    if (!pendingConfirm || confirmBusy) return;
+    setConfirmBusy(true);
     setGlobalError(null);
+
     try {
-      await trackSync(() => deleteStoryInCloud(uid, id));
-      showToast('Story deleted from cloud');
+      if (pendingConfirm.kind === 'trash_story') {
+        await trackSync(() => moveStoryToTrashInCloud(uid, pendingConfirm.story.id));
+        showToast('Moved story to Trash (recoverable for 30 days)');
+      } else if (pendingConfirm.kind === 'trash_section') {
+        if (!activeSession) return;
+        await flushSectionDraft(pendingConfirm.section.id);
+        const nextCount = Math.max(0, sectionsRef.current.length - 1);
+        await trackSync(() =>
+          moveSectionToTrashInCloud(
+            uid,
+            activeSession.id,
+            titleDraft || activeSession.title,
+            pendingConfirm.section,
+            nextCount,
+          ),
+        );
+        showToast('Moved section to Trash (recoverable for 30 days)');
+      } else if (pendingConfirm.kind === 'delete_story_forever') {
+        setTrashBusyItemId(pendingConfirm.story.id);
+        await trackSync(() => permanentlyDeleteStoryInCloud(uid, pendingConfirm.story.id));
+        showToast('Story permanently deleted');
+      } else if (pendingConfirm.kind === 'delete_section_forever') {
+        setTrashBusyItemId(pendingConfirm.section.id);
+        const parentExists = allStories.some((s) => s.id === pendingConfirm.section.parentStoryId);
+        if (pendingConfirm.section.audioId) {
+          deleteAudioClip(pendingConfirm.section.audioId).catch(() => undefined);
+        }
+        await trackSync(() =>
+          permanentlyDeleteSectionFromTrashInCloud(uid, pendingConfirm.section, parentExists),
+        );
+        showToast('Section permanently deleted');
+      }
+      setPendingConfirm(null);
     } catch (err) {
       setGlobalError(formatCloudErrorMessage(err));
+    } finally {
+      setConfirmBusy(false);
+      setTrashBusyItemId(null);
+    }
+  };
+
+  const handleRestoreStory = async (story: StorySession) => {
+    if (trashBusyItemId) return;
+    setTrashBusyItemId(story.id);
+    setGlobalError(null);
+    try {
+      await trackSync(() => restoreStoryFromTrashInCloud(uid, story.id));
+      setActiveSessionId(story.id);
+      showToast(`Restored "${story.title || 'Untitled Story'}"`);
+    } catch (err) {
+      setGlobalError(formatCloudErrorMessage(err));
+    } finally {
+      setTrashBusyItemId(null);
+    }
+  };
+
+  const handleRestoreSection = async (trashed: TrashedSection) => {
+    if (trashBusyItemId) return;
+    setTrashBusyItemId(trashed.id);
+    setGlobalError(null);
+    try {
+      const result = await trackSync(() =>
+        restoreSectionFromTrashInCloud(uid, trashed, allStories),
+      );
+      showToast(
+        result.usedFallbackStory
+          ? `Restored section to "${result.restoredStoryTitle}"`
+          : `Restored section to "${result.restoredStoryTitle}"`,
+      );
+    } catch (err) {
+      setGlobalError(formatCloudErrorMessage(err));
+    } finally {
+      setTrashBusyItemId(null);
     }
   };
 
@@ -501,7 +692,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     const targetEnding = activeRefinedEnding;
     const targetModel = activeSession.defaultModel;
 
-    // 1. Transcribe / polish via server-side Gemini API
+    // 1. Transcribe / polish via server-side Gemini API (returns text + exact usageMetadata)
     const result = await transcribeAudioApi({
       blob: staged.blob,
       filename: staged.filename,
@@ -520,7 +711,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       sizeBytes: staged.sizeBytes,
     };
 
-    // 2. Upload original audio to Firebase Storage at users/{uid}/audio/{storyId}/{sectionId}.{ext}
+    // 2. Upload original audio to Firebase Storage
     let audioUrl: string | undefined;
     let storagePath: string | undefined;
     let fallbackAudioId: string | undefined;
@@ -538,7 +729,6 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       audioUrl = uploaded.audioUrl;
       storagePath = uploaded.storagePath;
     } catch (uploadErr) {
-      // Preserve audio locally in IndexedDB as fallback so the user never loses a recording
       fallbackAudioId = createId('audio');
       await saveAudioClip(fallbackAudioId, staged.blob, audioMeta).catch(() => undefined);
       setGlobalError(
@@ -548,7 +738,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       setIsUploadingAudio(false);
     }
 
-    // 3. Save section + initial version history in Cloud Firestore
+    // 3. Save section + initial version history + token usage in Cloud Firestore
     const now = new Date().toISOString();
     const initialVersion: SectionVersion = {
       id: createId('ver'),
@@ -558,6 +748,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       model: targetModel,
       mode,
       timestamp: now,
+      usage: result.usage,
     };
 
     const nextSectionCount = sectionsRef.current.length + 1;
@@ -597,7 +788,6 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
 
   const handleSelectSectionVersion = async (sectionId: string, versionIndex: number) => {
     if (!activeSession) return;
-    // Flush any pending edits on the current version before switching
     await flushSectionDraft(sectionId);
 
     const target = sectionsRef.current.find((s) => s.id === sectionId);
@@ -633,9 +823,9 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
 
     try {
       let nextText = '';
+      let nextUsage = undefined;
       let usedAudio = false;
 
-      // 1. Prefer original audio stored in Firebase Storage (works from any device)
       if (section.storagePath || section.audioUrl) {
         const cloudBlob = await downloadSectionAudioBlob(section.storagePath, section.audioUrl);
         if (cloudBlob) {
@@ -648,11 +838,11 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
             mode: sectionMode,
           });
           nextText = result.text;
+          nextUsage = result.usage;
           usedAudio = true;
         }
       }
 
-      // 2. Fallback to local IndexedDB audio if present
       if (!usedAudio && section.audioId) {
         const stored = await getAudioClip(section.audioId);
         if (stored?.blob) {
@@ -665,11 +855,11 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
             mode: sectionMode,
           });
           nextText = result.text;
+          nextUsage = result.usage;
           usedAudio = true;
         }
       }
 
-      // 3. Fallback to text restyling
       if (!usedAudio) {
         const result = await restyleTextApi({
           text: currentActiveText,
@@ -679,6 +869,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
           mode: sectionMode,
         });
         nextText = result.text;
+        nextUsage = result.usage;
       }
 
       const now = new Date().toISOString();
@@ -690,6 +881,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
         model: chosenModel,
         mode: sectionMode,
         timestamp: now,
+        usage: nextUsage,
       };
 
       const existingVersions = getSectionVersions(section);
@@ -705,32 +897,6 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       setGlobalError(formatCloudErrorMessage(err));
     } finally {
       setReprocessingSectionId(null);
-    }
-  };
-
-  const handleDeleteSection = async (sectionId: string) => {
-    if (!activeSession) return;
-    setGlobalError(null);
-    const target = sectionsRef.current.find((s) => s.id === sectionId);
-    const nextSectionCount = Math.max(0, sectionsRef.current.length - 1);
-
-    if (target?.audioId) {
-      deleteAudioClip(target.audioId).catch(() => undefined);
-    }
-
-    try {
-      await trackSync(() =>
-        deleteSectionInCloud(
-          uid,
-          activeSession.id,
-          sectionId,
-          target?.storagePath,
-          nextSectionCount,
-        ),
-      );
-      showToast('Section deleted');
-    } catch (err) {
-      setGlobalError(formatCloudErrorMessage(err));
     }
   };
 
@@ -802,7 +968,42 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
 
   const isSyncing = pendingSyncOps > 0 || Object.keys(sectionDrafts).length > 0;
 
-  if (!storiesLoaded || !activeSession) {
+  // Build ConfirmDialog copy based on pending action
+  const confirmDialogConfig = useMemo(() => {
+    if (!pendingConfirm) return null;
+    switch (pendingConfirm.kind) {
+      case 'trash_story':
+        return {
+          title: 'Move story to Trash?',
+          message: 'Move this story to Trash? You can restore it within 30 days.',
+          confirmLabel: 'Move to Trash',
+          destructive: true,
+        };
+      case 'trash_section':
+        return {
+          title: 'Move section to Trash?',
+          message: 'Move this section and its audio to Trash? You can restore it within 30 days.',
+          confirmLabel: 'Move to Trash',
+          destructive: true,
+        };
+      case 'delete_story_forever':
+        return {
+          title: 'Delete story forever?',
+          message: 'Permanently delete forever? This cannot be undone.',
+          confirmLabel: 'Delete Forever',
+          destructive: true,
+        };
+      case 'delete_section_forever':
+        return {
+          title: 'Delete section forever?',
+          message: 'Permanently delete forever? This cannot be undone.',
+          confirmLabel: 'Delete Forever',
+          destructive: true,
+        };
+    }
+  }, [pendingConfirm]);
+
+  if (!storiesLoaded) {
     return (
       <div className="flex h-screen w-full flex-col items-center justify-center bg-white px-6 text-[#111827]">
         <div className="flex flex-col items-center gap-3 text-center">
@@ -821,9 +1022,11 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   return (
     <div className="flex h-screen w-full overflow-hidden bg-white text-[#111827]">
       <Sidebar
-        sessions={stories}
-        activeSessionId={activeSession.id}
+        sessions={activeStories}
+        activeSessionId={activeSession?.id ?? ''}
         activeSectionCount={orderedSections.length}
+        activeView={activeView}
+        trashCount={trashCount}
         isOpen={sidebarOpen}
         userEmail={user.email}
         onSignOut={() => {
@@ -834,6 +1037,11 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
         onSelectSession={(id) => {
           titleDirtyRef.current = false;
           setActiveSessionId(id);
+          setActiveView('story');
+          setGlobalError(null);
+        }}
+        onSelectTrash={() => {
+          setActiveView('trash');
           setGlobalError(null);
         }}
         onCreateSession={() => {
@@ -842,9 +1050,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
         onRenameSession={(id, title) => {
           void handleRenameSession(id, title);
         }}
-        onDeleteSession={(id) => {
-          void handleDeleteSession(id);
-        }}
+        onDeleteSession={handleRequestTrashStory}
       />
 
       {/* Main editorial column */}
@@ -867,16 +1073,27 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
             <div className="flex min-w-0 items-center gap-2 text-sm">
               {!sidebarOpen && (
                 <>
-                  <span className="hidden whitespace-nowrap font-semibold tracking-tight text-[#111827] sm:inline">
-                    SarYay
-                  </span>
+                  <div className="inline-flex shrink-0 items-center gap-2">
+                    <img
+                      src={BRAND_LOGO_URL}
+                      alt="SarYay"
+                      width={32}
+                      height={32}
+                      className="h-8 w-8 shrink-0 rounded-full border border-[#E5E7EB] bg-white object-cover"
+                    />
+                    <span className="hidden whitespace-nowrap font-semibold tracking-tight text-[#111827] sm:inline">
+                      SarYay
+                    </span>
+                  </div>
                   <span aria-hidden="true" className="hidden text-[#D1D5DB] sm:inline">
                     /
                   </span>
                 </>
               )}
               <span className="truncate font-medium text-[#374151]">
-                {titleDraft || activeSession.title || 'Untitled Story'}
+                {activeView === 'trash'
+                  ? 'Trash'
+                  : titleDraft || activeSession?.title || 'Untitled Story'}
               </span>
 
               {/* Minimal Cloud Sync / Upload Indicator */}
@@ -911,48 +1128,52 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
           </div>
 
           <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
-            <button
-              type="button"
-              disabled={!hasContent}
-              onClick={handleCopyFullStory}
-              className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-3 py-1.5 text-xs font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-not-allowed disabled:opacity-45"
-            >
-              {copiedFull ? (
-                <>
-                  <Check className="h-3.5 w-3.5 text-[#16A34A]" />
-                  <span className="text-[#16A34A]">Copied</span>
-                </>
-              ) : (
-                <>
-                  <Copy className="h-3.5 w-3.5" />
-                  <span className="hidden sm:inline">Copy Full Story</span>
-                  <span className="sm:hidden">Copy</span>
-                </>
-              )}
-            </button>
+            {activeView === 'story' && activeSession && (
+              <>
+                <button
+                  type="button"
+                  disabled={!hasContent}
+                  onClick={handleCopyFullStory}
+                  className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-3 py-1.5 text-xs font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-not-allowed disabled:opacity-45"
+                >
+                  {copiedFull ? (
+                    <>
+                      <Check className="h-3.5 w-3.5 text-[#16A34A]" />
+                      <span className="text-[#16A34A]">Copied</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="h-3.5 w-3.5" />
+                      <span className="hidden sm:inline">Copy Full Story</span>
+                      <span className="sm:hidden">Copy</span>
+                    </>
+                  )}
+                </button>
 
-            <button
-              type="button"
-              disabled={!hasContent}
-              onClick={handleExportTxt}
-              title="Export full story as plain text (.txt)"
-              className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-3 py-1.5 text-xs font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-not-allowed disabled:opacity-45"
-            >
-              <FileText className="h-3.5 w-3.5" />
-              <span>.txt</span>
-            </button>
+                <button
+                  type="button"
+                  disabled={!hasContent}
+                  onClick={handleExportTxt}
+                  title="Export full story as plain text (.txt)"
+                  className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-3 py-1.5 text-xs font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-not-allowed disabled:opacity-45"
+                >
+                  <FileText className="h-3.5 w-3.5" />
+                  <span>.txt</span>
+                </button>
 
-            <button
-              type="button"
-              disabled={!hasContent}
-              onClick={handleExportMd}
-              title="Export full session sequentially as Markdown (.md)"
-              className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-3 py-1.5 text-xs font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-not-allowed disabled:opacity-45"
-            >
-              <FileDown className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">Export as .md</span>
-              <span className="sm:hidden">.md</span>
-            </button>
+                <button
+                  type="button"
+                  disabled={!hasContent}
+                  onClick={handleExportMd}
+                  title="Export full session sequentially as Markdown (.md)"
+                  className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-3 py-1.5 text-xs font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-not-allowed disabled:opacity-45"
+                >
+                  <FileDown className="h-3.5 w-3.5" />
+                  <span className="hidden sm:inline">Export as .md</span>
+                  <span className="sm:hidden">.md</span>
+                </button>
+              </>
+            )}
 
             {!sidebarOpen && (
               <button
@@ -970,62 +1191,13 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
           </div>
         </header>
 
-        {/* Scrollable editorial manuscript canvas */}
+        {/* Scrollable main canvas (either Trash Bin view or active Story workspace) */}
         <main className="flex-1 overflow-y-auto bg-white">
-          <div className="mx-auto max-w-[780px] px-5 py-6 sm:px-10 sm:py-8">
-            {/* Editable story title & minimal metadata */}
-            <div className="mb-5">
-              <input
-                type="text"
-                value={titleDraft}
-                onChange={(e) => handleTitleInputChange(e.target.value)}
-                onBlur={handleTitleInputBlur}
-                placeholder="Untitled Story"
-                aria-label="Story title"
-                className="font-manuscript w-full border-0 bg-transparent p-0 text-2xl font-semibold tracking-tight text-[#111827] placeholder:text-[#9CA3AF] focus:outline-none sm:text-[28px]"
-              />
-
-              <div className="mt-1.5 flex items-center gap-1.5 text-xs text-[#6B7280] tabular-nums">
-                <span>
-                  {orderedSections.length}{' '}
-                  {orderedSections.length === 1 ? 'section' : 'sections'}
-                </span>
-                <span aria-hidden="true">·</span>
-                <span>{totalCharacters.toLocaleString()} characters</span>
-                {(isUploadingAudio || isSyncing) && (
-                  <span className="inline-flex items-center gap-1 text-[#4338CA] sm:hidden">
-                    <span aria-hidden="true">·</span>
-                    <span>{isUploadingAudio ? 'Uploading audio…' : 'Syncing…'}</span>
-                  </span>
-                )}
-              </div>
-            </div>
-
-            {/* Compact Dictation & Upload Bar */}
-            <div className="mb-7">
-              <DictationDock
-                storyTitle={titleDraft || activeSession.title}
-                style={activeSession.defaultStyle}
-                refinedEnding={activeRefinedEnding}
-                model={activeSession.defaultModel}
-                onStyleChange={(nextStyle) => {
-                  void handleStyleChange(nextStyle);
-                }}
-                onRefinedEndingChange={(nextEnding) => {
-                  void handleRefinedEndingChange(nextEnding);
-                }}
-                onModelChange={(nextModel) => {
-                  void handleModelChange(nextModel);
-                }}
-                onTranscribe={handleTranscribeAudio}
-              />
-            </div>
-
-            {/* Global error banner (e.g., cloud sync, storage, or re-processing error) */}
-            {globalError && (
+          {globalError && activeView === 'trash' && (
+            <div className="mx-auto max-w-[780px] px-5 pt-6 sm:px-10">
               <div
                 role="alert"
-                className="mb-6 flex items-start justify-between gap-3 rounded-lg border border-[#FECACA] bg-[#FEF2F2] px-4 py-3 text-xs text-[#991B1B]"
+                className="flex items-start justify-between gap-3 rounded-lg border border-[#FECACA] bg-[#FEF2F2] px-4 py-3 text-xs text-[#991B1B]"
               >
                 <div className="flex items-start gap-2.5">
                   <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-[#DC2626]" />
@@ -1040,45 +1212,195 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                   <X className="h-3.5 w-3.5" />
                 </button>
               </div>
-            )}
+            </div>
+          )}
 
-            {/* Loading sections state */}
-            {!sectionsLoaded && orderedSections.length === 0 ? (
-              <div className="flex items-center gap-2 py-8 text-xs text-[#6B7280]">
-                <Loader2 className="h-3.5 w-3.5 animate-spin text-[#4338CA]" />
-                <span>Syncing sections…</span>
+          {activeView === 'trash' ? (
+            <TrashBinView
+              uid={uid}
+              trashedStories={trashedStories}
+              trashedSections={trashedSections}
+              busyItemId={trashBusyItemId}
+              onRestoreStory={(story) => {
+                void handleRestoreStory(story);
+              }}
+              onRequestDeleteStoryForever={(story) =>
+                setPendingConfirm({ kind: 'delete_story_forever', story })
+              }
+              onRestoreSection={(section) => {
+                void handleRestoreSection(section);
+              }}
+              onRequestDeleteSectionForever={(section) =>
+                setPendingConfirm({ kind: 'delete_section_forever', section })
+              }
+              onCopyText={copyToClipboard}
+            />
+          ) : !activeSession ? (
+            <div className="mx-auto flex max-w-[780px] flex-col items-center justify-center px-5 py-20 text-center sm:px-10">
+              <p className="text-sm font-medium text-[#374151]">No active stories</p>
+              <p className="mt-1 text-xs text-[#6B7280]">
+                Start a new story or restore a deleted story from Trash.
+              </p>
+              <div className="mt-5 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleCreateSession();
+                  }}
+                  className="rounded-lg bg-[#4338CA] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[#3730A3]"
+                >
+                  New Story
+                </button>
+                {trashCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setActiveView('trash')}
+                    className="rounded-lg border border-[#E5E7EB] bg-white px-4 py-2 text-xs font-medium text-[#374151] transition-colors hover:bg-[#F9FAFB]"
+                  >
+                    Open Trash ({trashCount})
+                  </button>
+                )}
               </div>
-            ) : null}
+            </div>
+          ) : (
+            <div className="mx-auto max-w-[780px] px-5 py-6 sm:px-10 sm:py-8">
+              {/* Editable story title & minimal metadata (+ subtle cumulative token summary) */}
+              <div className="mb-5">
+                <input
+                  type="text"
+                  value={titleDraft}
+                  onChange={(e) => handleTitleInputChange(e.target.value)}
+                  onBlur={handleTitleInputBlur}
+                  placeholder="Untitled Story"
+                  aria-label="Story title"
+                  className="font-manuscript w-full border-0 bg-transparent p-0 text-2xl font-semibold tracking-tight text-[#111827] placeholder:text-[#9CA3AF] focus:outline-none sm:text-[28px]"
+                />
 
-            {/* Manuscript Sections Stream (oldest to newest as spoken, directly below recorder) */}
-            {orderedSections.length > 0 && (
-              <div className="space-y-6 pb-16">
-                {orderedSections.map((section, idx) => (
-                  <SectionBlock
-                    key={section.id}
-                    section={section}
-                    index={idx}
-                    activeModel={activeSession.defaultModel}
-                    isReprocessing={reprocessingSectionId === section.id}
-                    onUpdateContent={handleUpdateSectionContent}
-                    onFlushContent={(secId) => {
-                      void flushSectionDraft(secId);
-                    }}
-                    onSelectVersion={(secId, versionIdx) => {
-                      void handleSelectSectionVersion(secId, versionIdx);
-                    }}
-                    onReprocessStyle={handleReprocessStyle}
-                    onDeleteSection={(secId) => {
-                      void handleDeleteSection(secId);
-                    }}
-                    onCopyText={(txt) => copyToClipboard(txt, 'Section copied')}
-                  />
-                ))}
+                <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-[#6B7280] tabular-nums">
+                  <span>
+                    {orderedSections.length}{' '}
+                    {orderedSections.length === 1 ? 'section' : 'sections'}
+                  </span>
+                  <span aria-hidden="true">·</span>
+                  <span>{totalCharacters.toLocaleString()} characters</span>
+                  {sessionTokenStats.totalTokens > 0 && (
+                    <>
+                      <span aria-hidden="true" className="text-[#D1D5DB]">
+                        ·
+                      </span>
+                      <span
+                        className="text-[11px] text-[#9CA3AF]"
+                        title="Cumulative Gemini token usage and estimated cost for this story session"
+                      >
+                        {formatSessionTokenSummary(
+                          sessionTokenStats.totalTokens,
+                          sessionTokenStats.totalCostUsd,
+                        )}
+                      </span>
+                    </>
+                  )}
+                  {(isUploadingAudio || isSyncing) && (
+                    <span className="inline-flex items-center gap-1 text-[#4338CA] sm:hidden">
+                      <span aria-hidden="true">·</span>
+                      <span>{isUploadingAudio ? 'Uploading audio…' : 'Syncing…'}</span>
+                    </span>
+                  )}
+                </div>
               </div>
-            )}
-          </div>
+
+              {/* Compact Dictation & Upload Bar */}
+              <div className="mb-7">
+                <DictationDock
+                  storyTitle={titleDraft || activeSession.title}
+                  style={activeSession.defaultStyle}
+                  refinedEnding={activeRefinedEnding}
+                  model={activeSession.defaultModel}
+                  onStyleChange={(nextStyle) => {
+                    void handleStyleChange(nextStyle);
+                  }}
+                  onRefinedEndingChange={(nextEnding) => {
+                    void handleRefinedEndingChange(nextEnding);
+                  }}
+                  onModelChange={(nextModel) => {
+                    void handleModelChange(nextModel);
+                  }}
+                  onTranscribe={handleTranscribeAudio}
+                />
+              </div>
+
+              {/* Global error banner */}
+              {globalError && (
+                <div
+                  role="alert"
+                  className="mb-6 flex items-start justify-between gap-3 rounded-lg border border-[#FECACA] bg-[#FEF2F2] px-4 py-3 text-xs text-[#991B1B]"
+                >
+                  <div className="flex items-start gap-2.5">
+                    <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-[#DC2626]" />
+                    <p className="leading-relaxed">{globalError}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setGlobalError(null)}
+                    aria-label="Dismiss error"
+                    className="shrink-0 rounded p-0.5 text-[#991B1B] hover:bg-[#FEE2E2]"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              )}
+
+              {/* Loading sections state */}
+              {!sectionsLoaded && orderedSections.length === 0 ? (
+                <div className="flex items-center gap-2 py-8 text-xs text-[#6B7280]">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-[#4338CA]" />
+                  <span>Syncing sections…</span>
+                </div>
+              ) : null}
+
+              {/* Manuscript Sections Stream */}
+              {orderedSections.length > 0 && (
+                <div className="space-y-6 pb-16">
+                  {orderedSections.map((section, idx) => (
+                    <SectionBlock
+                      key={section.id}
+                      section={section}
+                      index={idx}
+                      activeModel={activeSession.defaultModel}
+                      isReprocessing={reprocessingSectionId === section.id}
+                      onUpdateContent={handleUpdateSectionContent}
+                      onFlushContent={(secId) => {
+                        void flushSectionDraft(secId);
+                      }}
+                      onSelectVersion={(secId, versionIdx) => {
+                        void handleSelectSectionVersion(secId, versionIdx);
+                      }}
+                      onReprocessStyle={handleReprocessStyle}
+                      onDeleteSection={handleRequestTrashSection}
+                      onCopyText={(txt) => copyToClipboard(txt, 'Section copied')}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </main>
       </div>
+
+      {/* Mandatory Confirmation Dialog for Soft Delete & Delete Forever */}
+      <ConfirmDialog
+        open={Boolean(confirmDialogConfig)}
+        title={confirmDialogConfig?.title ?? ''}
+        message={confirmDialogConfig?.message ?? ''}
+        confirmLabel={confirmDialogConfig?.confirmLabel ?? 'Confirm'}
+        destructive={confirmDialogConfig?.destructive ?? true}
+        busy={confirmBusy}
+        onCancel={() => {
+          if (!confirmBusy) setPendingConfirm(null);
+        }}
+        onConfirm={() => {
+          void handleConfirmAction();
+        }}
+      />
 
       {/* Subtle transient confirmation toast */}
       {toastMessage && (

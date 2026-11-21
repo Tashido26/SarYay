@@ -23,7 +23,11 @@ import {
   getActiveVersionIndex,
   getSectionVersions,
 } from '../types.ts';
-import { formatDuration, formatTimestamp } from '../lib/format.ts';
+import {
+  formatDuration,
+  formatTimestamp,
+  formatTokenUsageCompact,
+} from '../lib/format.ts';
 import { AudioPlayerBar } from './AudioPlayerBar.tsx';
 
 interface ReprocessOption {
@@ -73,7 +77,6 @@ export function SectionBlock({
   const [showAudio, setShowAudio] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
   const [saveLabel, setSaveLabel] = useState<'Saved' | 'Saving…'>('Saved');
   const saveTimerRef = useRef<number | null>(null);
 
@@ -317,39 +320,17 @@ export function SectionBlock({
             )}
           </div>
 
-          {confirmDelete ? (
-            <div className="ml-1 inline-flex items-center gap-1">
-              <button
-                type="button"
-                onClick={() => {
-                  onDeleteSection(section.id);
-                  setConfirmDelete(false);
-                }}
-                className="whitespace-nowrap rounded-md bg-[#DC2626] px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-[#B91C1C]"
-              >
-                Confirm Delete
-              </button>
-              <button
-                type="button"
-                onClick={() => setConfirmDelete(false)}
-                className="whitespace-nowrap rounded-md border border-[#E5E7EB] bg-white px-2 py-1 text-xs font-medium text-[#4B5563] transition-colors hover:bg-[#F9FAFB]"
-              >
-                Cancel
-              </button>
-            </div>
-          ) : (
-            <button
-              type="button"
-              disabled={isReprocessing}
-              onClick={() => setConfirmDelete(true)}
-              aria-label={`Delete section ${index + 1}`}
-              title="Delete section"
-              className="inline-flex items-center gap-1 whitespace-nowrap rounded-md px-2 py-1.5 text-xs font-medium text-[#6B7280] transition-colors duration-150 hover:bg-[#FEE2E2] hover:text-[#DC2626] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:opacity-50"
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-              <span className="sr-only sm:not-sr-only">Delete</span>
-            </button>
-          )}
+          <button
+            type="button"
+            disabled={isReprocessing}
+            onClick={() => onDeleteSection(section.id)}
+            aria-label={`Move section ${index + 1} to Trash`}
+            title="Move section to Trash"
+            className="inline-flex items-center gap-1 whitespace-nowrap rounded-md px-2 py-1.5 text-xs font-medium text-[#6B7280] transition-colors duration-150 hover:bg-[#FEE2E2] hover:text-[#DC2626] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:opacity-50"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            <span className="sr-only sm:not-sr-only">Delete</span>
+          </button>
         </div>
       </div>
 
@@ -381,6 +362,18 @@ export function SectionBlock({
           className="font-manuscript block w-full resize-none overflow-hidden rounded-lg border border-transparent bg-transparent px-1 py-1.5 text-[16.5px] text-[#111827] placeholder:text-[#9CA3AF] focus:border-[#E5E7EB] focus:px-3 focus:outline-none disabled:opacity-60"
         />
       </div>
+
+      {/* Subtle, low-contrast per-version token usage & estimated cost */}
+      {activeVersion.usage && activeVersion.usage.totalTokens > 0 ? (
+        <div className="mt-1 flex justify-end">
+          <span
+            className="select-none text-[11px] text-[#9CA3AF] tabular-nums"
+            title={`Input: ${activeVersion.usage.inputTokens.toLocaleString()} · Output: ${activeVersion.usage.outputTokens.toLocaleString()} tokens`}
+          >
+            {formatTokenUsageCompact(activeVersion.usage)}
+          </span>
+        </div>
+      ) : null}
     </article>
   );
 }

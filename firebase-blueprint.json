@@ -2,7 +2,7 @@
   "entities": {
     "Story": {
       "title": "Story",
-      "description": "A user's private writing session / story containing ordered manuscript sections.",
+      "description": "A user's private writing session / story containing ordered manuscript sections, with 30-day soft-delete Trash support.",
       "type": "object",
       "properties": {
         "ownerId": {
@@ -35,7 +35,16 @@
         },
         "sectionCount": {
           "type": "integer",
-          "description": "Current number of sections belonging to this story (0..5000)."
+          "description": "Current number of active sections belonging to this story (0..5000)."
+        },
+        "isDeleted": {
+          "type": "boolean",
+          "description": "Whether the story has been soft-deleted into the 30-day Trash Bin."
+        },
+        "deletedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the story was moved to Trash, or null when active."
         },
         "createdAt": {
           "type": "string",
@@ -61,7 +70,7 @@
     },
     "Section": {
       "title": "Section",
-      "description": "A single transcribed or uploaded voice section inside a story, with non-destructive style version history and Firebase Storage audio metadata.",
+      "description": "A single transcribed or uploaded voice section inside a story, with non-destructive version history, token/cost usage metadata, Firebase Storage audio metadata, and 30-day soft-delete support.",
       "type": "object",
       "properties": {
         "ownerId": {
@@ -80,7 +89,7 @@
         },
         "order": {
           "type": "number",
-          "description": "Monotonic numeric ordering key (epoch ms) preserving chronological order across devices."
+          "description": "Monotonic numeric ordering key preserving chronological order across devices."
         },
         "content": {
           "type": "string",
@@ -109,7 +118,7 @@
         },
         "versions": {
           "type": "array",
-          "description": "Bounded non-destructive version history array (1..50 items)."
+          "description": "Bounded non-destructive version history array (1..50 items), each optionally containing token/cost usage metadata."
         },
         "activeVersionIndex": {
           "type": "integer",
@@ -118,7 +127,7 @@
         "audioUrl": {
           "type": "string",
           "maxLength": 2048,
-          "description": "Firebase Storage download URL for the original audio clip (or empty string if unavailable)."
+          "description": "Firebase Storage download URL for the original audio clip (or empty string)."
         },
         "storagePath": {
           "type": "string",
@@ -128,11 +137,30 @@
         "audioId": {
           "type": "string",
           "maxLength": 128,
-          "description": "Optional local fallback audio clip ID (or empty string)."
+          "description": "Optional local fallback audio clip ID."
         },
         "audioMeta": {
           "type": "object",
-          "description": "Metadata describing the recorded or uploaded audio file (filename, mimeType, durationSec, sizeBytes)."
+          "description": "Metadata describing the recorded or uploaded audio file."
+        },
+        "isDeleted": {
+          "type": "boolean",
+          "description": "Whether this section has been soft-deleted into the 30-day Trash Bin."
+        },
+        "deletedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when moved to Trash, or null when active."
+        },
+        "parentStoryId": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Original story ID preserved for independent Trash viewing and restoration."
+        },
+        "parentStoryTitle": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "Original story title snapshot at the time the section was moved to Trash."
         },
         "createdAt": {
           "type": "string",
@@ -161,16 +189,122 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "TrashedSection": {
+      "title": "TrashedSection",
+      "description": "Independent Trash Bin index entry for a soft-deleted individual section so it can be previewed, played, copied, auto-purged after 30 days, or restored even if its parent story was permanently deleted.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "parentStoryId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "parentStoryTitle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "order": {
+          "type": "number"
+        },
+        "content": {
+          "type": "string",
+          "maxLength": 200000
+        },
+        "style": {
+          "type": "string",
+          "enum": ["colloquial", "literary", "refined_flow"]
+        },
+        "refinedEnding": {
+          "type": "string",
+          "enum": ["colloquial", "literary"]
+        },
+        "model": {
+          "type": "string",
+          "enum": ["gemini-2.5-flash", "gemini-2.5-pro"]
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["full_polish", "summarize_structure"]
+        },
+        "versions": {
+          "type": "array"
+        },
+        "activeVersionIndex": {
+          "type": "integer"
+        },
+        "audioUrl": {
+          "type": "string",
+          "maxLength": 2048
+        },
+        "storagePath": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "audioId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "audioMeta": {
+          "type": "object"
+        },
+        "isDeleted": {
+          "type": "boolean"
+        },
+        "deletedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "parentStoryId",
+        "parentStoryTitle",
+        "order",
+        "content",
+        "style",
+        "refinedEnding",
+        "model",
+        "mode",
+        "versions",
+        "activeVersionIndex",
+        "audioUrl",
+        "storagePath",
+        "isDeleted",
+        "deletedAt",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
     "/users/{userId}/stories/{storyId}": {
       "schema": { "$ref": "#/entities/Story" },
-      "description": "Private stories owned by the authenticated whitelisted user."
+      "description": "Private stories (active and soft-deleted) owned by the authenticated whitelisted user."
     },
     "/users/{userId}/stories/{storyId}/sections/{sectionId}": {
       "schema": { "$ref": "#/entities/Section" },
-      "description": "Ordered manuscript sections and version histories belonging to a story."
+      "description": "Ordered manuscript sections, version histories, and token usage belonging to a story."
+    },
+    "/users/{userId}/trashedSections/{sectionId}": {
+      "schema": { "$ref": "#/entities/TrashedSection" },
+      "description": "Soft-deleted individual sections stored for 30-day Trash Bin viewing, playback, restoration, and automatic cleanup."
     }
   }
 }

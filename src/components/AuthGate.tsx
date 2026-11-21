@@ -9,6 +9,7 @@ import {
   signInWithGooglePopup,
   signOutUser,
 } from '../lib/firebase.ts';
+import { BRAND_LOGO_URL } from '../lib/brand.ts';
 
 interface AuthGateProps {
   children: (props: { user: User; onSignOut: () => Promise<void> }) => ReactNode;
@@ -39,24 +40,17 @@ function GoogleLogoIcon() {
   );
 }
 
-function StudioMark() {
+function StudioBrandLockup() {
   return (
-    <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl border border-[#E5E7EB] bg-[#F8F9FA] text-[#4338CA]">
-      <svg
-        className="h-6 w-6"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.75"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-hidden="true"
-      >
-        <path d="M12 3a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z" />
-        <path d="M19 10v1a7 7 0 0 1-14 0v-1" />
-        <path d="M12 18v3" />
-        <path d="M8 21h8" />
-      </svg>
+    <div className="flex items-center justify-center gap-3">
+      <img
+        src={BRAND_LOGO_URL}
+        alt="SarYay"
+        width={40}
+        height={40}
+        className="h-10 w-10 shrink-0 rounded-full border border-[#E5E7EB] bg-white object-cover"
+      />
+      <span className="text-xl font-semibold tracking-tight text-[#111827]">SarYay</span>
     </div>
   );
 }
@@ -165,11 +159,10 @@ export function AuthGate({ children }: AuthGateProps) {
   return (
     <div className="flex min-h-screen w-full flex-col items-center justify-center bg-white px-6 py-12 text-[#111827]">
       <div className="w-full max-w-[420px] rounded-2xl border border-[#E5E7EB] bg-white p-8 sm:p-10">
-        <StudioMark />
+        <StudioBrandLockup />
 
-        <div className="mt-6 text-center">
-          <p className="text-xs font-medium tracking-wide text-[#4338CA]">SarYay</p>
-          <h1 className="mt-1.5 text-2xl font-semibold tracking-tight text-[#111827] [text-wrap:balance]">
+        <div className="mt-5 text-center">
+          <h1 className="text-2xl font-semibold tracking-tight text-[#111827] [text-wrap:balance]">
             Personal Voice &amp; Story Studio
           </h1>
           <p className="mt-2.5 text-sm leading-relaxed text-[#6B7280]">

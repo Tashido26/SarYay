@@ -197,3 +197,40 @@ export function safeExportFilename(title: string, extension: 'txt' | 'md'): stri
 export function countCharacters(text: string): number {
   return text.replace(/\s+/g, '').length;
 }
+
+export function formatUsdCost(usd: number): string {
+  if (!Number.isFinite(usd) || usd <= 0) return '~$0.0000';
+  if (usd < 0.01) return `~$${usd.toFixed(4)}`;
+  if (usd < 1) return `~$${usd.toFixed(3)}`;
+  return `~$${usd.toFixed(2)}`;
+}
+
+export function formatTokenUsageCompact(usage: {
+  totalTokens: number;
+  estimatedCostUsd: number;
+}): string {
+  return `${usage.totalTokens.toLocaleString()} tokens · ${formatUsdCost(usage.estimatedCostUsd)}`;
+}
+
+export function formatSessionTokenSummary(totalTokens: number, totalCostUsd: number): string {
+  return `${totalTokens.toLocaleString()} tokens (${formatUsdCost(totalCostUsd)})`;
+}
+
+export const TRASH_RETENTION_DAYS = 30;
+export const TRASH_RETENTION_MS = TRASH_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+
+export function getTrashDaysRemaining(deletedAt: string | null | undefined): number {
+  if (!deletedAt) return TRASH_RETENTION_DAYS;
+  const deletedMs = Date.parse(deletedAt);
+  if (!Number.isFinite(deletedMs)) return TRASH_RETENTION_DAYS;
+  const elapsed = Date.now() - deletedMs;
+  const remainingMs = TRASH_RETENTION_MS - elapsed;
+  return Math.max(0, Math.ceil(remainingMs / (24 * 60 * 60 * 1000)));
+}
+
+export function isTrashItemExpired(deletedAt: string | null | undefined): boolean {
+  if (!deletedAt) return false;
+  const deletedMs = Date.parse(deletedAt);
+  if (!Number.isFinite(deletedMs)) return false;
+  return Date.now() - deletedMs > TRASH_RETENTION_MS;
+}

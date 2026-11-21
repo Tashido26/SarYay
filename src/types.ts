@@ -13,6 +13,13 @@ export interface AudioMeta {
   sizeBytes: number;
 }
 
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  estimatedCostUsd: number;
+}
+
 export interface SectionVersion {
   id: string;
   text: string;
@@ -21,6 +28,7 @@ export interface SectionVersion {
   model: GeminiModel;
   mode?: ProcessingMode;
   timestamp: string;
+  usage?: TokenUsage;
 }
 
 export interface ManuscriptSection {
@@ -39,8 +47,19 @@ export interface ManuscriptSection {
   audioMeta?: AudioMeta;
   versions?: SectionVersion[];
   activeVersionIndex?: number;
+  isDeleted?: boolean;
+  deletedAt?: string | null;
+  parentStoryId?: string;
+  parentStoryTitle?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface TrashedSection extends ManuscriptSection {
+  parentStoryId: string;
+  parentStoryTitle: string;
+  isDeleted: true;
+  deletedAt: string;
 }
 
 export interface StorySession {
@@ -51,6 +70,8 @@ export interface StorySession {
   defaultRefinedEnding?: VoiceEnding;
   defaultModel: GeminiModel;
   sectionCount?: number;
+  isDeleted?: boolean;
+  deletedAt?: string | null;
   sections: ManuscriptSection[];
   createdAt: string;
   updatedAt: string;

@@ -63,17 +63,28 @@ service cloud.firestore {
         && meta.sizeBytes is number && meta.sizeBytes >= 0 && meta.sizeBytes <= 104857600;
     }
 
+    function isValidUsage(usage) {
+      return usage is map
+        && usage.keys().hasAll(['inputTokens', 'outputTokens', 'totalTokens', 'estimatedCostUsd'])
+        && usage.keys().hasOnly(['inputTokens', 'outputTokens', 'totalTokens', 'estimatedCostUsd'])
+        && usage.inputTokens is number && usage.inputTokens >= 0 && usage.inputTokens <= 100000000
+        && usage.outputTokens is number && usage.outputTokens >= 0 && usage.outputTokens <= 100000000
+        && usage.totalTokens is number && usage.totalTokens >= 0 && usage.totalTokens <= 200000000
+        && usage.estimatedCostUsd is number && usage.estimatedCostUsd >= 0 && usage.estimatedCostUsd <= 10000;
+    }
+
     function isValidVersionItem(v) {
       return v is map
         && v.keys().hasAll(['id', 'text', 'style', 'refinedEnding', 'model', 'mode', 'timestamp'])
-        && v.keys().hasOnly(['id', 'text', 'style', 'refinedEnding', 'model', 'mode', 'timestamp'])
+        && v.keys().hasOnly(['id', 'text', 'style', 'refinedEnding', 'model', 'mode', 'timestamp', 'usage'])
         && isValidId(v.id)
         && v.text is string && v.text.size() <= 200000
         && isValidStyle(v.style)
         && isValidEnding(v.refinedEnding)
         && isValidModel(v.model)
         && isValidMode(v.mode)
-        && v.timestamp is string && v.timestamp.size() >= 1 && v.timestamp.size() <= 64;
+        && v.timestamp is string && v.timestamp.size() >= 1 && v.timestamp.size() <= 64
+        && (!('usage' in v) || isValidUsage(v.usage));
     }
 
     // -------------------------------------------------------------------------
@@ -97,6 +108,8 @@ service cloud.firestore {
           'defaultRefinedEnding',
           'defaultModel',
           'sectionCount',
+          'isDeleted',
+          'deletedAt',
           'createdAt',
           'updatedAt'
         ])
@@ -108,6 +121,8 @@ service cloud.firestore {
         && isValidEnding(data.defaultRefinedEnding)
         && isValidModel(data.defaultModel)
         && data.sectionCount is int && data.sectionCount >= 0 && data.sectionCount <= 5000
+        && (!('isDeleted' in data) || data.isDeleted is bool)
+        && (!('deletedAt' in data) || data.deletedAt == null || data.deletedAt is timestamp)
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -144,6 +159,10 @@ service cloud.firestore {
           'storagePath',
           'audioId',
           'audioMeta',
+          'isDeleted',
+          'deletedAt',
+          'parentStoryId',
+          'parentStoryTitle',
           'createdAt',
           'updatedAt'
         ])
@@ -170,6 +189,80 @@ service cloud.firestore {
         && data.storagePath is string && data.storagePath.size() <= 512
         && (!('audioId' in data) || (data.audioId is string && data.audioId.size() <= 128))
         && (!('audioMeta' in data) || isValidAudioMeta(data.audioMeta))
+        && (!('isDeleted' in data) || data.isDeleted is bool)
+        && (!('deletedAt' in data) || data.deletedAt == null || data.deletedAt is timestamp)
+        && (!('parentStoryId' in data) || (data.parentStoryId is string && data.parentStoryId.size() <= 128))
+        && (!('parentStoryTitle' in data) || (data.parentStoryTitle is string && data.parentStoryTitle.size() <= 300))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidTrashedSection(data, userId) {
+      return data.keys().hasAll([
+          'ownerId',
+          'parentStoryId',
+          'parentStoryTitle',
+          'order',
+          'content',
+          'style',
+          'refinedEnding',
+          'model',
+          'mode',
+          'versions',
+          'activeVersionIndex',
+          'audioUrl',
+          'storagePath',
+          'isDeleted',
+          'deletedAt',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId',
+          'parentStoryId',
+          'parentStoryTitle',
+          'order',
+          'content',
+          'style',
+          'refinedEnding',
+          'model',
+          'mode',
+          'versions',
+          'activeVersionIndex',
+          'audioUrl',
+          'storagePath',
+          'audioId',
+          'audioMeta',
+          'isDeleted',
+          'deletedAt',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.ownerId == userId
+        && isValidId(data.parentStoryId)
+        && data.parentStoryTitle is string && data.parentStoryTitle.size() >= 1 && data.parentStoryTitle.size() <= 300
+        && data.order is number && data.order >= 0
+        && data.content is string && data.content.size() <= 200000
+        && isValidStyle(data.style)
+        && isValidEnding(data.refinedEnding)
+        && isValidModel(data.model)
+        && isValidMode(data.mode)
+        && data.versions is list
+        && data.versions.size() >= 1
+        && data.versions.size() <= 50
+        && data.activeVersionIndex is int
+        && data.activeVersionIndex >= 0
+        && data.activeVersionIndex < data.versions.size()
+        && isValidVersionItem(data.versions[0])
+        && isValidVersionItem(data.versions[data.activeVersionIndex])
+        && data.audioUrl is string && data.audioUrl.size() <= 2048
+        && data.storagePath is string && data.storagePath.size() <= 512
+        && (!('audioId' in data) || (data.audioId is string && data.audioId.size() <= 128))
+        && (!('audioMeta' in data) || isValidAudioMeta(data.audioMeta))
+        && data.isDeleted == true
+        && data.deletedAt is timestamp
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -191,6 +284,8 @@ service cloud.firestore {
         && isValidId(userId)
         && isValidId(storyId)
         && isValidStory(incoming(), userId)
+        && (!('isDeleted' in incoming()) || incoming().isDeleted == false)
+        && (!('deletedAt' in incoming()) || incoming().deletedAt == null)
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
 
@@ -209,9 +304,21 @@ service cloud.firestore {
           || incoming().diff(existing()).affectedKeys().hasOnly(['defaultStyle', 'updatedAt'])
           || incoming().diff(existing()).affectedKeys().hasOnly(['defaultRefinedEnding', 'updatedAt'])
           || incoming().diff(existing()).affectedKeys().hasOnly(['defaultModel', 'updatedAt'])
-          // Action: Touch story metadata / section count when sections are added, edited, or removed
+          // Action: Touch story metadata / section count when sections change
           || incoming().diff(existing()).affectedKeys().hasOnly(['sectionCount', 'updatedAt'])
           || incoming().diff(existing()).affectedKeys().hasOnly(['updatedAt'])
+          // Action: Soft-delete story (move to 30-day Trash Bin)
+          || (
+            incoming().diff(existing()).affectedKeys().hasOnly(['isDeleted', 'deletedAt', 'updatedAt'])
+            && incoming().isDeleted == true
+            && incoming().deletedAt == request.time
+          )
+          // Action: Restore story from Trash Bin
+          || (
+            incoming().diff(existing()).affectedKeys().hasOnly(['isDeleted', 'deletedAt', 'updatedAt'])
+            && incoming().isDeleted == false
+            && incoming().deletedAt == null
+          )
         );
 
       allow delete: if isAuthorizedOwner(userId)
@@ -246,6 +353,8 @@ service cloud.firestore {
           && isValidId(storyId)
           && isValidId(sectionId)
           && isValidSection(incoming(), userId, storyId)
+          && (!('isDeleted' in incoming()) || incoming().isDeleted == false)
+          && (!('deletedAt' in incoming()) || incoming().deletedAt == null)
           && incoming().createdAt == request.time
           && incoming().updatedAt == request.time
           && parentStoryBelongsToOwner();
@@ -285,12 +394,35 @@ service cloud.firestore {
               'activeVersionIndex',
               'updatedAt'
             ])
-            // Action: Attach uploaded Firebase Storage audio URL/path after upload
+            // Action: Attach uploaded Firebase Storage audio URL/path
             || incoming().diff(existing()).affectedKeys().hasOnly([
               'audioUrl',
               'storagePath',
               'updatedAt'
             ])
+            // Action: Soft-delete individual section (move to 30-day Trash Bin)
+            || (
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'isDeleted',
+                'deletedAt',
+                'parentStoryId',
+                'parentStoryTitle',
+                'updatedAt'
+              ])
+              && incoming().isDeleted == true
+              && incoming().deletedAt == request.time
+              && incoming().parentStoryId == storyId
+            )
+            // Action: Restore individual section from Trash Bin
+            || (
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'isDeleted',
+                'deletedAt',
+                'updatedAt'
+              ])
+              && incoming().isDeleted == false
+              && incoming().deletedAt == null
+            )
           );
 
         allow delete: if isAuthorizedOwner(userId)
@@ -301,6 +433,35 @@ service cloud.firestore {
           && existing().storyId == storyId
           && parentStoryBelongsToOwner();
       }
+    }
+
+    // -------------------------------------------------------------------------
+    // Collection: /users/{userId}/trashedSections/{sectionId}
+    // -------------------------------------------------------------------------
+    match /users/{userId}/trashedSections/{sectionId} {
+      allow get: if isAuthorizedOwner(userId)
+        && isValidId(userId)
+        && isValidId(sectionId)
+        && existing().ownerId == request.auth.uid;
+
+      // Pillar 8: Secure list query without get()/exists() lookups
+      allow list: if isAuthorizedOwner(userId)
+        && existing().ownerId == request.auth.uid;
+
+      allow create: if isAuthorizedOwner(userId)
+        && isValidId(userId)
+        && isValidId(sectionId)
+        && isValidTrashedSection(incoming(), userId)
+        && incoming().deletedAt == request.time
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if false;
+
+      allow delete: if isAuthorizedOwner(userId)
+        && isValidId(userId)
+        && isValidId(sectionId)
+        && existing().ownerId == request.auth.uid;
     }
   }
 }
