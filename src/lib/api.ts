@@ -1,4 +1,5 @@
 import type { GeminiModel, ProcessingMode, WritingStyle } from '../types.ts';
+import { getAuthIdToken } from './firebase.ts';
 
 export interface TranscribeResponse {
   text: string;
@@ -14,6 +15,9 @@ async function parseErrorResponse(res: Response): Promise<string> {
     if (data.message) return data.message;
   } catch {
     // Fallback to status-specific guidance
+  }
+  if (res.status === 401 || res.status === 403) {
+    return 'Access Denied: Your session is unauthorized or expired. Please sign in again.';
   }
   if (res.status === 413) {
     return 'This audio file is larger than the hosting platform upload limit (~6 MB on Netlify). Please split or compress the recording into smaller clips.';
@@ -32,6 +36,7 @@ export async function transcribeAudioApi(params: {
   mode?: ProcessingMode;
   signal?: AbortSignal;
 }): Promise<TranscribeResponse> {
+  const idToken = await getAuthIdToken();
   const formData = new FormData();
   const file = new File([params.blob], params.filename, {
     type: params.blob.type || 'audio/webm',
@@ -43,6 +48,9 @@ export async function transcribeAudioApi(params: {
 
   const response = await fetch('/api/transcribe', {
     method: 'POST',
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+    },
     body: formData,
     signal: params.signal,
   });
@@ -65,9 +73,13 @@ export async function restyleTextApi(params: {
   mode?: ProcessingMode;
   signal?: AbortSignal;
 }): Promise<TranscribeResponse> {
+  const idToken = await getAuthIdToken();
   const response = await fetch('/api/restyle', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${idToken}`,
+    },
     body: JSON.stringify({
       text: params.text,
       style: params.style,

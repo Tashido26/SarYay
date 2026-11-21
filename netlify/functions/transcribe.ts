@@ -1,5 +1,6 @@
 import { formatApiError, transcribeAudioBuffer } from '../../shared/geminiService.ts';
 import type { GeminiModel, ProcessingMode, WritingStyle } from '../../shared/geminiService.ts';
+import { verifyAuthorizedRequest } from '../../shared/verifyFirebaseAuth.ts';
 
 export const config = {
   path: '/api/transcribe',
@@ -15,6 +16,7 @@ export default async (req: Request): Promise<Response> => {
   }
 
   try {
+    await verifyAuthorizedRequest(req.headers.get('authorization'));
     const formData = await req.formData();
     const audioEntry = formData.get('audio');
 

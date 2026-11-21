@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { User } from 'firebase/auth';
 import {
   AlertCircle,
   Check,
   Copy,
   FileDown,
   FileText,
+  LogOut,
   Mic,
   PanelLeft,
   X,
@@ -40,8 +42,22 @@ import {
 import { Sidebar } from './components/Sidebar.tsx';
 import { DictationDock } from './components/DictationDock.tsx';
 import { SectionBlock } from './components/SectionBlock.tsx';
+import { AuthGate } from './components/AuthGate.tsx';
 
 export default function App() {
+  return (
+    <AuthGate>
+      {({ user, onSignOut }) => <StudioWorkspace user={user} onSignOut={onSignOut} />}
+    </AuthGate>
+  );
+}
+
+interface StudioWorkspaceProps {
+  user: User;
+  onSignOut: () => Promise<void>;
+}
+
+function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   const [sessions, setSessions] = useState<StorySession[]>(() => loadSessions());
   const [activeSessionId, setActiveSessionId] = useState<string>(() => {
     const initial = loadSessions();
@@ -361,6 +377,10 @@ export default function App() {
         sessions={sessions}
         activeSessionId={activeSession.id}
         isOpen={sidebarOpen}
+        userEmail={user.email}
+        onSignOut={() => {
+          onSignOut().catch(() => undefined);
+        }}
         onCloseMobile={() => setSidebarOpen(false)}
         onToggleDesktop={() => setSidebarOpen((prev) => !prev)}
         onSelectSession={(id) => {
@@ -461,6 +481,20 @@ export default function App() {
               <FileDown className="h-3.5 w-3.5" />
               <span>.md</span>
             </button>
+
+            {!sidebarOpen && (
+              <button
+                type="button"
+                onClick={() => {
+                  onSignOut().catch(() => undefined);
+                }}
+                title={`Sign out (${user.email ?? 'Account'})`}
+                className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-2.5 py-1.5 text-xs font-medium text-[#6B7280] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA]"
+              >
+                <LogOut className="h-3.5 w-3.5" />
+                <span className="hidden md:inline">Sign Out</span>
+              </button>
+            )}
           </div>
         </header>
 

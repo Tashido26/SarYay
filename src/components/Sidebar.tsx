@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, PanelLeftClose, Pencil, Plus, Trash2, X } from 'lucide-react';
+import { Check, LogOut, PanelLeftClose, Pencil, Plus, Trash2, X } from 'lucide-react';
 import type { StorySession } from '../types.ts';
 import { STYLE_LABELS } from '../types.ts';
 import { formatTimestamp } from '../lib/format.ts';
@@ -8,6 +8,8 @@ interface SidebarProps {
   sessions: StorySession[];
   activeSessionId: string;
   isOpen: boolean;
+  userEmail?: string | null;
+  onSignOut: () => void;
   onCloseMobile: () => void;
   onToggleDesktop: () => void;
   onSelectSession: (id: string) => void;
@@ -20,6 +22,8 @@ export function Sidebar({
   sessions,
   activeSessionId,
   isOpen,
+  userEmail,
+  onSignOut,
   onCloseMobile,
   onToggleDesktop,
   onSelectSession,
@@ -234,9 +238,27 @@ export function Sidebar({
         })}
       </nav>
 
-      {/* Quiet local persistence note */}
-      <div className="shrink-0 border-t border-[#E5E7EB] px-4 py-3 text-[11px] text-[#6B7280]">
-        Stories &amp; audio clips saved locally in your browser.
+      {/* Account & Sign Out footer */}
+      <div className="shrink-0 border-t border-[#E5E7EB] px-3.5 py-3">
+        <div className="flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            {userEmail ? (
+              <p className="truncate text-xs font-medium text-[#374151]" title={userEmail}>
+                {userEmail}
+              </p>
+            ) : null}
+            <p className="text-[11px] text-[#6B7280]">Saved locally in browser</p>
+          </div>
+          <button
+            type="button"
+            onClick={onSignOut}
+            className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-[#E5E7EB] bg-white px-2.5 py-1.5 text-xs font-medium text-[#4B5563] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA]"
+            title="Sign out"
+          >
+            <LogOut className="h-3.5 w-3.5" />
+            <span>Sign Out</span>
+          </button>
+        </div>
       </div>
     </aside>
   );

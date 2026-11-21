@@ -11,6 +11,7 @@ import {
   transcribeAudioBuffer,
 } from './shared/geminiService.ts';
 import type { GeminiModel, ProcessingMode, WritingStyle } from './shared/geminiService.ts';
+import { verifyAuthorizedRequest } from './shared/verifyFirebaseAuth.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -23,6 +24,20 @@ const upload = multer({
   },
 });
 
+async function requireAuthorizedUser(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    await verifyAuthorizedRequest(req.headers.authorization);
+    next();
+  } catch (err) {
+    const formatted = formatApiError(err);
+    res.status(formatted.status).json({ error: formatted.message });
+  }
+}
+
 async function startServer(): Promise<void> {
   const app = express();
   app.use(express.json({ limit: '4mb' }));
@@ -31,37 +46,42 @@ async function startServer(): Promise<void> {
     res.json({ ok: true, runtime: 'express' });
   });
 
-  app.post('/api/transcribe', upload.single('audio'), async (req: Request, res: Response) => {
-    try {
-      const file = req.file;
-      if (!file || !file.buffer || file.buffer.length === 0) {
-        res.status(400).json({
-          error: 'No audio file was received. Please record or upload a valid audio clip.',
+  app.post(
+    '/api/transcribe',
+    requireAuthorizedUser,
+    upload.single('audio'),
+    async (req: Request, res: Response) => {
+      try {
+        const file = req.file;
+        if (!file || !file.buffer || file.buffer.length === 0) {
+          res.status(400).json({
+            error: 'No audio file was received. Please record or upload a valid audio clip.',
+          });
+          return;
+        }
+
+        const style = String(req.body?.style || 'literary') as WritingStyle;
+        const model = String(req.body?.model || 'gemini-2.5-flash') as GeminiModel;
+        const mode = String(req.body?.mode || 'full_polish') as ProcessingMode;
+
+        const result = await transcribeAudioBuffer({
+          buffer: file.buffer,
+          rawMimeType: file.mimetype,
+          filename: file.originalname,
+          style,
+          model,
+          mode,
         });
-        return;
+
+        res.json(result);
+      } catch (err) {
+        const formatted = formatApiError(err);
+        res.status(formatted.status).json({ error: formatted.message });
       }
+    },
+  );
 
-      const style = String(req.body?.style || 'literary') as WritingStyle;
-      const model = String(req.body?.model || 'gemini-2.5-flash') as GeminiModel;
-      const mode = String(req.body?.mode || 'full_polish') as ProcessingMode;
-
-      const result = await transcribeAudioBuffer({
-        buffer: file.buffer,
-        rawMimeType: file.mimetype,
-        filename: file.originalname,
-        style,
-        model,
-        mode,
-      });
-
-      res.json(result);
-    } catch (err) {
-      const formatted = formatApiError(err);
-      res.status(formatted.status).json({ error: formatted.message });
-    }
-  });
-
-  app.post('/api/restyle', async (req: Request, res: Response) => {
+  app.post('/api/restyle', requireAuthorizedUser, async (req: Request, res: Response) => {
     try {
       const text = typeof req.body?.text === 'string' ? req.body.text : '';
       const style = String(req.body?.style || 'literary') as WritingStyle;
