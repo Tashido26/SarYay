@@ -97,6 +97,21 @@ type PendingConfirmAction =
   | { kind: 'delete_story_forever'; story: StorySession }
   | { kind: 'delete_section_forever'; section: TrashedSection };
 
+function getNextUntitledStoryTitle(stories: StorySession[]): string {
+  let maxNumber = 0;
+  for (const story of stories) {
+    const trimmed = (story.title || '').trim();
+    const match = /^Untitled Story\s+(\d+)$/i.exec(trimmed);
+    if (match) {
+      const parsed = Number.parseInt(match[1], 10);
+      if (Number.isFinite(parsed) && parsed > maxNumber) {
+        maxNumber = parsed;
+      }
+    }
+  }
+  return `Untitled Story ${maxNumber + 1}`;
+}
+
 export default function App() {
   return (
     <AuthGate>
@@ -116,8 +131,11 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   const [recentStories, setRecentStories] = useState<StorySession[]>([]);
   const [recentHasMore, setRecentHasMore] = useState(false);
   const [olderStories, setOlderStories] = useState<StorySession[]>([]);
+  const [optimisticStories, setOptimisticStories] = useState<StorySession[]>([]);
   const [olderHasMore, setOlderHasMore] = useState<boolean | null>(null);
   const [isLoadingMoreStories, setIsLoadingMoreStories] = useState(false);
+  const [isCreatingStory, setIsCreatingStory] = useState(false);
+  const creatingStoryRef = useRef(false);
   const recentLastDocRef = useRef<StoryCursor | null>(null);
   const olderLastDocRef = useRef<StoryCursor | null>(null);
 
@@ -181,7 +199,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   const bootstrappedRef = useRef<boolean>(false);
   const initialPurgeRanRef = useRef<boolean>(false);
 
-  // Merge live top-30 stories with any paginated older stories (live docs take precedence)
+  // Merge live top-30 stories with paginated older stories and newly created optimistic stories
   const loadedStories = useMemo(() => {
     const byId = new Map<string, StorySession>();
     for (const story of recentStories) {
@@ -192,10 +210,15 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
         byId.set(story.id, story);
       }
     }
+    for (const story of optimisticStories) {
+      if (!byId.has(story.id)) {
+        byId.set(story.id, story);
+      }
+    }
     return Array.from(byId.values()).sort(
       (a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt),
     );
-  }, [recentStories, olderStories]);
+  }, [recentStories, olderStories, optimisticStories]);
 
   const activeStories = useMemo(
     () => loadedStories.filter((s) => !s.isDeleted),
@@ -355,6 +378,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     setRecentStories([]);
     setRecentHasMore(false);
     setOlderStories([]);
+    setOptimisticStories([]);
     setOlderHasMore(null);
     setStoriesLoaded(false);
 
@@ -363,6 +387,9 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       STORIES_PAGE_SIZE,
       ({ stories, hasMore, lastDoc }) => {
         setRecentStories(stories);
+        setOptimisticStories((prev) =>
+          prev.length === 0 ? prev : prev.filter((opt) => !stories.some((s) => s.id === opt.id)),
+        );
         setRecentHasMore(hasMore);
         recentLastDocRef.current = lastDoc;
         setStoriesLoaded(true);
@@ -471,15 +498,38 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
 
           if (!imported) {
             const freshId = createId('story');
+            const initialTitle = 'Untitled Story 1';
+            const nowIso = new Date().toISOString();
+            setOptimisticStories((prev) => [
+              {
+                id: freshId,
+                title: initialTitle,
+                defaultStyle: 'colloquial',
+                defaultRefinedEnding: 'colloquial',
+                defaultModel: 'gemini-2.5-flash',
+                sectionCount: 0,
+                glossary: '',
+                isDeleted: false,
+                deletedAt: null,
+                sections: [],
+                createdAt: nowIso,
+                updatedAt: nowIso,
+              },
+              ...prev.filter((s) => s.id !== freshId),
+            ]);
+            setTitleDraft(initialTitle);
+            titleDraftRef.current = initialTitle;
+            activeSessionIdRef.current = freshId;
+            setActiveSessionId(freshId);
+            setLastOpenedStoryId(freshId);
+            setActiveView('story');
             await createStoryInCloud(uid, {
               storyId: freshId,
-              title: 'Untitled Story',
+              title: initialTitle,
               defaultStyle: 'colloquial',
               defaultRefinedEnding: 'colloquial',
               defaultModel: 'gemini-2.5-flash',
             });
-            setActiveSessionId(freshId);
-            setLastOpenedStoryId(freshId);
           }
         });
       } catch (err) {
@@ -842,30 +892,92 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   }, [flushAllPendingEdits]);
 
   const handleCreateSession = async () => {
+    if (creatingStoryRef.current) return;
+    creatingStoryRef.current = true;
+    setIsCreatingStory(true);
+
     const prevStoryId = activeSessionIdRef.current;
     if (prevStoryId) {
       void flushAllPendingEdits(prevStoryId);
     }
     setGlobalError(null);
+
     const freshId = createId('story');
-    try {
-      await trackSync(() =>
-        createStoryInCloud(uid, {
-          storyId: freshId,
-          title: 'Untitled Story',
-          defaultStyle: activeSession?.defaultStyle ?? 'colloquial',
-          defaultRefinedEnding: activeSession?.defaultRefinedEnding ?? 'colloquial',
-          defaultModel: activeSession?.defaultModel ?? 'gemini-2.5-flash',
-        }),
-      );
-      titleDirtyRef.current = false;
-      glossaryDirtyRef.current = false;
-      setActiveSessionId(freshId);
-      setLastOpenedStoryId(freshId);
-      setActiveView('story');
-    } catch (err) {
-      setGlobalError(formatCloudErrorMessage(err));
+    const nextTitle = getNextUntitledStoryTitle(activeStories);
+    const defaultStyle = activeSession?.defaultStyle ?? 'colloquial';
+    const defaultRefinedEnding = activeSession?.defaultRefinedEnding ?? 'colloquial';
+    const defaultModel = activeSession?.defaultModel ?? 'gemini-2.5-flash';
+    const nowIso = new Date().toISOString();
+
+    const optimisticStory: StorySession = {
+      id: freshId,
+      title: nextTitle,
+      defaultStyle,
+      defaultRefinedEnding,
+      defaultModel,
+      sectionCount: 0,
+      glossary: '',
+      isDeleted: false,
+      deletedAt: null,
+      sections: [],
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+
+    // Optimistically register the new story and navigate straight into its editor
+    setOptimisticStories((prev) => [optimisticStory, ...prev.filter((s) => s.id !== freshId)]);
+    titleDirtyRef.current = false;
+    glossaryDirtyRef.current = false;
+    setTitleDraft(nextTitle);
+    titleDraftRef.current = nextTitle;
+    setGlossaryDraft('');
+    glossaryDraftRef.current = '';
+    setSections([]);
+    setSectionsLoaded(true);
+    activeSessionIdRef.current = freshId;
+    setActiveSessionId(freshId);
+    setLastOpenedStoryId(freshId);
+    setActiveView('story');
+    if (typeof window !== 'undefined' && window.innerWidth < 1024) {
+      setSidebarOpen(false);
     }
+
+    const rollbackCreation = (err: unknown) => {
+      setOptimisticStories((prev) => prev.filter((s) => s.id !== freshId));
+      if (activeSessionIdRef.current === freshId) {
+        activeSessionIdRef.current = prevStoryId;
+        setActiveSessionId(prevStoryId);
+      }
+      setGlobalError(formatCloudErrorMessage(err));
+    };
+
+    const writePromise = trackSync(() =>
+      createStoryInCloud(uid, {
+        storyId: freshId,
+        title: nextTitle,
+        defaultStyle,
+        defaultRefinedEnding,
+        defaultModel,
+      }),
+    );
+
+    try {
+      await Promise.race([
+        writePromise,
+        new Promise<void>((resolve) => window.setTimeout(resolve, 1500)),
+      ]);
+    } catch (err) {
+      rollbackCreation(err);
+      return;
+    } finally {
+      creatingStoryRef.current = false;
+      setIsCreatingStory(false);
+    }
+
+    // If the write took > 1.5s (e.g. reconnecting/offline) and later rejects, roll back cleanly
+    writePromise.catch((err) => {
+      rollbackCreation(err);
+    });
   };
 
   const handleTitleInputChange = (nextTitle: string) => {
@@ -1487,6 +1599,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
         trashCount={trashCount}
         hasMoreStories={hasMoreStories}
         isLoadingMoreStories={isLoadingMoreStories}
+        isCreatingStory={isCreatingStory}
         isOpen={sidebarOpen}
         userEmail={user.email}
         onSignOut={() => {
@@ -1681,15 +1794,17 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
 
         {/* Scrollable main canvas (either Trash Bin view or active Story workspace) */}
         <main className="safe-bottom-scroll flex-1 overflow-y-auto bg-white">
-          {globalError && activeView === 'trash' && (
+          {globalError && (activeView === 'trash' || !activeSession) && (
             <div className="mx-auto max-w-[780px] px-5 pt-6 sm:px-10">
               <div
                 role="alert"
                 className="flex items-start justify-between gap-3 rounded-lg border border-[#FECACA] bg-[#FEF2F2] px-4 py-3 text-xs text-[#991B1B]"
               >
-                <div className="flex items-start gap-2.5">
+                <div className="flex min-w-0 flex-1 items-start gap-2.5">
                   <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-[#DC2626]" />
-                  <p className="leading-relaxed">{globalError}</p>
+                  <p className="min-w-0 flex-1 break-words leading-relaxed [overflow-wrap:anywhere]">
+                    {globalError}
+                  </p>
                 </div>
                 <button
                   type="button"
@@ -1743,12 +1858,20 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                     )}
                     <button
                       type="button"
+                      disabled={isCreatingStory}
                       onClick={() => {
                         void handleCreateSession();
                       }}
-                      className="rounded-lg border border-[#E5E7EB] bg-white px-4 py-2 text-xs font-medium text-[#374151] transition-colors hover:bg-[#F9FAFB]"
+                      className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-[#E5E7EB] bg-white px-4 py-2 text-xs font-medium text-[#374151] transition-colors hover:bg-[#F9FAFB] disabled:cursor-wait disabled:opacity-60"
                     >
-                      New Story
+                      {isCreatingStory ? (
+                        <>
+                          <Loader2 className="h-3.5 w-3.5 animate-spin text-[#4338CA]" />
+                          <span>Creating…</span>
+                        </>
+                      ) : (
+                        <span>New Story</span>
+                      )}
                     </button>
                     {!sidebarOpen && (
                       <button
@@ -1770,12 +1893,20 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                   <div className="mt-5 flex items-center gap-2">
                     <button
                       type="button"
+                      disabled={isCreatingStory}
                       onClick={() => {
                         void handleCreateSession();
                       }}
-                      className="rounded-lg bg-[#4338CA] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[#3730A3]"
+                      className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-[#4338CA] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[#3730A3] disabled:cursor-wait disabled:opacity-60"
                     >
-                      New Story
+                      {isCreatingStory ? (
+                        <>
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          <span>Creating…</span>
+                        </>
+                      ) : (
+                        <span>New Story</span>
+                      )}
                     </button>
                     {trashCount > 0 && (
                       <button

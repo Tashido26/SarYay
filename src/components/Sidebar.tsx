@@ -22,6 +22,7 @@ interface SidebarProps {
   trashCount: number;
   hasMoreStories?: boolean;
   isLoadingMoreStories?: boolean;
+  isCreatingStory?: boolean;
   isOpen: boolean;
   userEmail?: string | null;
   onSignOut: () => void;
@@ -43,6 +44,7 @@ export function Sidebar({
   trashCount,
   hasMoreStories = false,
   isLoadingMoreStories = false,
+  isCreatingStory = false,
   isOpen,
   userEmail,
   onSignOut,
@@ -138,14 +140,25 @@ export function Sidebar({
       <div className="px-3 pb-3">
         <button
           type="button"
+          disabled={isCreatingStory}
           onClick={() => {
+            if (isCreatingStory) return;
             onCreateSession();
             onCloseMobile();
           }}
-          className="flex w-full items-center justify-center gap-2 whitespace-nowrap rounded-lg bg-[#4338CA] px-4 py-2.5 text-sm font-medium text-white transition-colors duration-150 hover:bg-[#3730A3] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA]"
+          className="flex w-full items-center justify-center gap-2 whitespace-nowrap rounded-lg bg-[#4338CA] px-4 py-2.5 text-sm font-medium text-white transition-colors duration-150 hover:bg-[#3730A3] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-wait disabled:opacity-65"
         >
-          <Plus className="h-4 w-4 shrink-0" />
-          <span>New Story</span>
+          {isCreatingStory ? (
+            <>
+              <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+              <span>Creating…</span>
+            </>
+          ) : (
+            <>
+              <Plus className="h-4 w-4 shrink-0" />
+              <span>New Story</span>
+            </>
+          )}
         </button>
       </div>
 
