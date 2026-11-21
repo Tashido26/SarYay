@@ -7,7 +7,6 @@ import {
   FileDown,
   FileText,
   LogOut,
-  Mic,
   PanelLeft,
   X,
 } from 'lucide-react';
@@ -20,7 +19,7 @@ import type {
   VoiceEnding,
   WritingStyle,
 } from './types.ts';
-import { MODEL_LABELS, formatStyleWithEnding } from './types.ts';
+import { formatStyleWithEnding } from './types.ts';
 import { deleteAudioClip, deleteAudioClips, getAudioClip, saveAudioClip } from './lib/audioDb.ts';
 import { restyleTextApi, transcribeAudioApi } from './lib/api.ts';
 import {
@@ -79,7 +78,6 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   const [copiedFull, setCopiedFull] = useState(false);
 
   const toastTimeoutRef = useRef<number | null>(null);
-  const dockAnchorRef = useRef<HTMLDivElement | null>(null);
 
   const showToast = useCallback((message: string) => {
     setToastMessage(message);
@@ -453,19 +451,6 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
           </div>
 
           <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
-            {activeSession.sections.length >= 2 && (
-              <button
-                type="button"
-                onClick={() =>
-                  dockAnchorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-                }
-                className="hidden items-center gap-1.5 whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-medium text-[#4338CA] transition-colors duration-150 hover:bg-[#EEF2FF] md:inline-flex"
-              >
-                <Mic className="h-3.5 w-3.5" />
-                <span>New Recording</span>
-              </button>
-            )}
-
             <button
               type="button"
               disabled={!hasContent}
@@ -527,9 +512,9 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
 
         {/* Scrollable editorial manuscript canvas */}
         <main className="flex-1 overflow-y-auto bg-white">
-          <div className="mx-auto max-w-[780px] px-5 py-8 sm:px-10 sm:py-12">
-            {/* Editable story title & quiet unboxed metadata */}
-            <div className="mb-8">
+          <div className="mx-auto max-w-[780px] px-5 py-6 sm:px-10 sm:py-8">
+            {/* Editable story title & minimal metadata */}
+            <div className="mb-5">
               <input
                 type="text"
                 value={activeSession.title}
@@ -543,23 +528,31 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                 }}
                 placeholder="Untitled Story"
                 aria-label="Story title"
-                className="font-manuscript w-full border-0 bg-transparent p-0 text-2xl font-semibold tracking-tight text-[#111827] placeholder:text-[#9CA3AF] focus:outline-none sm:text-[30px]"
+                className="font-manuscript w-full border-0 bg-transparent p-0 text-2xl font-semibold tracking-tight text-[#111827] placeholder:text-[#9CA3AF] focus:outline-none sm:text-[28px]"
               />
 
-              <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[#6B7280] tabular-nums">
+              <div className="mt-1.5 flex items-center gap-1.5 text-xs text-[#6B7280] tabular-nums">
                 <span>
                   {activeSession.sections.length}{' '}
                   {activeSession.sections.length === 1 ? 'section' : 'sections'}
                 </span>
                 <span aria-hidden="true">·</span>
                 <span>{totalCharacters.toLocaleString()} characters</span>
-                <span aria-hidden="true">·</span>
-                <span>
-                  Default: {formatStyleWithEnding(activeSession.defaultStyle, activeRefinedEnding)}
-                </span>
-                <span aria-hidden="true">·</span>
-                <span>{MODEL_LABELS[activeSession.defaultModel]}</span>
               </div>
+            </div>
+
+            {/* Compact Dictation & Upload Bar */}
+            <div className="mb-7">
+              <DictationDock
+                storyTitle={activeSession.title}
+                style={activeSession.defaultStyle}
+                refinedEnding={activeRefinedEnding}
+                model={activeSession.defaultModel}
+                onStyleChange={handleStyleChange}
+                onRefinedEndingChange={handleRefinedEndingChange}
+                onModelChange={handleModelChange}
+                onTranscribe={handleTranscribeAudio}
+              />
             </div>
 
             {/* Global error banner (e.g., re-processing error) */}
@@ -583,9 +576,9 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
               </div>
             )}
 
-            {/* Manuscript Sections Stream (oldest to newest as spoken) */}
+            {/* Manuscript Sections Stream (oldest to newest as spoken, directly below recorder) */}
             {orderedSections.length > 0 && (
-              <div className="mb-10 space-y-6">
+              <div className="space-y-6 pb-16">
                 {orderedSections.map((section, idx) => (
                   <SectionBlock
                     key={section.id}
@@ -601,45 +594,6 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                 ))}
               </div>
             )}
-
-            {/* Dictation & Upload Studio Dock */}
-            <div ref={dockAnchorRef} className="pb-16">
-              <DictationDock
-                storyTitle={activeSession.title}
-                style={activeSession.defaultStyle}
-                refinedEnding={activeRefinedEnding}
-                model={activeSession.defaultModel}
-                onStyleChange={handleStyleChange}
-                onRefinedEndingChange={handleRefinedEndingChange}
-                onModelChange={handleModelChange}
-                onTranscribe={handleTranscribeAudio}
-                hasSections={activeSession.sections.length > 0}
-              />
-
-              {/* Subtle guidance when story is empty */}
-              {activeSession.sections.length === 0 && (
-                <div className="mt-8 grid gap-6 border-t border-[#F3F4F6] pt-7 sm:grid-cols-3">
-                  <div>
-                    <h3 className="text-xs font-semibold text-[#111827]">No silence cutoffs</h3>
-                    <p className="mt-1 text-xs leading-relaxed text-[#6B7280]">
-                      Pause for 10 or 30 seconds mid-sentence to gather your thoughts—capture stays active until you press Stop.
-                    </p>
-                  </div>
-                  <div>
-                    <h3 className="text-xs font-semibold text-[#111827]">Faithful literary polish</h3>
-                    <p className="mt-1 text-xs leading-relaxed text-[#6B7280]">
-                      Removes spoken fillers and fixes Burmese spelling and punctuation without summarizing or omitting any scene.
-                    </p>
-                  </div>
-                  <div>
-                    <h3 className="text-xs font-semibold text-[#111827]">Local audio safety</h3>
-                    <p className="mt-1 text-xs leading-relaxed text-[#6B7280]">
-                      Every clip stays saved in your browser for playback, backup download, and one-click style re-processing.
-                    </p>
-                  </div>
-                </div>
-              )}
-            </div>
           </div>
         </main>
       </div>
