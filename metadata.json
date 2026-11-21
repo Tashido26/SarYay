@@ -1,6 +1,10 @@
 {
-  "name": "Sarpay Studio",
+  "name": "SarYay",
   "description": "Minimalist Burmese and English voice dictation, transcription, and literary text polishing studio for writers and novelists.",
-  "requestFramePermissions": ["microphone"],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }
