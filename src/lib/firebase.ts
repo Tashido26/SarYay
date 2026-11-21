@@ -6,7 +6,15 @@ import {
   signOut,
   type User,
 } from 'firebase/auth';
-import { doc, getDocFromServer, getFirestore } from 'firebase/firestore';
+import {
+  doc,
+  getDocFromServer,
+  getFirestore,
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+  type Firestore,
+} from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 import firebaseAppletConfig from '../../firebase-applet-config.json';
 import { isEmailAuthorized, parseAllowedEmails } from '../../shared/authConfig.ts';
@@ -37,7 +45,24 @@ export const isFirebaseConfigured = Boolean(
 
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
-export const db = getFirestore(app, firestoreDatabaseId);
+
+function createFirestoreDb(): Firestore {
+  try {
+    return initializeFirestore(
+      app,
+      {
+        localCache: persistentLocalCache({
+          tabManager: persistentMultipleTabManager(),
+        }),
+      },
+      firestoreDatabaseId,
+    );
+  } catch {
+    return getFirestore(app, firestoreDatabaseId);
+  }
+}
+
+export const db = createFirestoreDb();
 export const storage = getStorage(app);
 
 export enum OperationType {

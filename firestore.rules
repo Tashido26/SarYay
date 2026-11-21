@@ -276,9 +276,11 @@ service cloud.firestore {
         && isValidId(storyId)
         && existing().ownerId == request.auth.uid;
 
-      // Pillar 8: Secure list query without get()/exists() lookups
-      allow list: if isAuthorizedOwner(userId)
-        && existing().ownerId == request.auth.uid;
+      // Pillar 8: Strict path-level owner isolation without get()/exists() lookups.
+      // Every document in /users/{userId}/stories is strictly enforced on create/update to have
+      // ownerId == userId == request.auth.uid, enabling single-field indexed orderBy('updatedAt', 'desc')
+      // pagination and where('isDeleted', '==', true) Trash queries with zero manual composite indexes.
+      allow list: if isAuthorizedOwner(userId);
 
       allow create: if isAuthorizedOwner(userId)
         && isValidId(userId)

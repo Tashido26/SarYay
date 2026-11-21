@@ -37,6 +37,7 @@ export function AudioPlayerBar({
   const [missingClip, setMissingClip] = useState<boolean>(false);
 
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isBuffering, setIsBuffering] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(meta.durationSec || 0);
 
@@ -108,16 +109,34 @@ export function AudioPlayerBar({
     };
     const onEnded = () => {
       setIsPlaying(false);
+      setIsBuffering(false);
       setCurrentTime(0);
     };
-    const onPause = () => setIsPlaying(false);
+    const onPause = () => {
+      setIsPlaying(false);
+      setIsBuffering(false);
+    };
     const onPlay = () => setIsPlaying(true);
+    const onPlaying = () => {
+      setIsPlaying(true);
+      setIsBuffering(false);
+    };
+    const onWaiting = () => setIsBuffering(true);
+    const onCanPlay = () => setIsBuffering(false);
+    const onError = () => {
+      setIsPlaying(false);
+      setIsBuffering(false);
+    };
 
     audio.addEventListener('timeupdate', onTimeUpdate);
     audio.addEventListener('loadedmetadata', onLoadedMetadata);
     audio.addEventListener('ended', onEnded);
     audio.addEventListener('pause', onPause);
     audio.addEventListener('play', onPlay);
+    audio.addEventListener('playing', onPlaying);
+    audio.addEventListener('waiting', onWaiting);
+    audio.addEventListener('canplay', onCanPlay);
+    audio.addEventListener('error', onError);
 
     return () => {
       audio.removeEventListener('timeupdate', onTimeUpdate);
@@ -125,6 +144,10 @@ export function AudioPlayerBar({
       audio.removeEventListener('ended', onEnded);
       audio.removeEventListener('pause', onPause);
       audio.removeEventListener('play', onPlay);
+      audio.removeEventListener('playing', onPlaying);
+      audio.removeEventListener('waiting', onWaiting);
+      audio.removeEventListener('canplay', onCanPlay);
+      audio.removeEventListener('error', onError);
     };
   }, [resolvedUrl]);
 
@@ -135,8 +158,12 @@ export function AudioPlayerBar({
       audio.pause();
     } else {
       try {
+        if (audio.readyState < 2) {
+          setIsBuffering(true);
+        }
         await audio.play();
       } catch (err) {
+        setIsBuffering(false);
         console.warn('Audio playback blocked or failed:', err);
       }
     }
@@ -204,7 +231,7 @@ export function AudioPlayerBar({
         compact ? 'px-3 py-2' : 'px-4 py-3'
       }`}
     >
-      <audio ref={audioRef} src={resolvedUrl} preload="metadata" />
+      <audio ref={audioRef} src={resolvedUrl} preload="none" />
 
       <button
         type="button"
@@ -212,7 +239,13 @@ export function AudioPlayerBar({
         aria-label={isPlaying ? 'Pause audio' : 'Play audio'}
         className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#4338CA] text-white transition-colors duration-150 hover:bg-[#3730A3] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA]"
       >
-        {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="ml-0.5 h-4 w-4" />}
+        {isBuffering ? (
+          <Loader2 className="h-4 w-4 animate-spin" />
+        ) : isPlaying ? (
+          <Pause className="h-4 w-4" />
+        ) : (
+          <Play className="ml-0.5 h-4 w-4" />
+        )}
       </button>
 
       <div className="min-w-[160px] flex-1">

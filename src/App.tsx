@@ -32,10 +32,12 @@ import {
 import { deleteAudioClip, getAudioClip, saveAudioClip } from './lib/audioDb.ts';
 import { restyleTextApi, transcribeAudioApi } from './lib/api.ts';
 import {
+  STORIES_PAGE_SIZE,
   appendSectionVersionInCloud,
   createSectionInCloud,
   createStoryInCloud,
   downloadSectionAudioBlob,
+  fetchOlderStoriesPage,
   formatCloudErrorMessage,
   moveSectionToTrashInCloud,
   moveStoryToTrashInCloud,
@@ -46,14 +48,16 @@ import {
   restoreSectionFromTrashInCloud,
   restoreStoryFromTrashInCloud,
   selectSectionVersionInCloud,
+  subscribeToRecentStories,
   subscribeToSections,
-  subscribeToStories,
   subscribeToTrashedSections,
+  subscribeToTrashedStories,
   updateSectionContentInCloud,
   updateStoryModelInCloud,
   updateStoryRefinedEndingInCloud,
   updateStoryStyleInCloud,
   uploadSectionAudio,
+  type StoryCursor,
 } from './lib/cloudStore.ts';
 import {
   compileFullStoryMarkdown,
@@ -104,15 +108,26 @@ interface StudioWorkspaceProps {
 function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   const uid = user.uid;
 
-  const [allStories, setAllStories] = useState<StorySession[]>([]);
+  const [recentStories, setRecentStories] = useState<StorySession[]>([]);
+  const [recentHasMore, setRecentHasMore] = useState(false);
+  const [olderStories, setOlderStories] = useState<StorySession[]>([]);
+  const [olderHasMore, setOlderHasMore] = useState<boolean | null>(null);
+  const [isLoadingMoreStories, setIsLoadingMoreStories] = useState(false);
+  const recentLastDocRef = useRef<StoryCursor | null>(null);
+  const olderLastDocRef = useRef<StoryCursor | null>(null);
+
   const [storiesLoaded, setStoriesLoaded] = useState(false);
+  const [trashedStories, setTrashedStories] = useState<StorySession[]>([]);
+  const [trashedStoriesLoaded, setTrashedStoriesLoaded] = useState(false);
   const [trashedSections, setTrashedSections] = useState<TrashedSection[]>([]);
   const [trashedSectionsLoaded, setTrashedSectionsLoaded] = useState(false);
 
   const [activeView, setActiveView] = useState<'story' | 'trash'>('story');
-  const [activeSessionId, setActiveSessionId] = useState<string>(() => loadActiveSessionId(''));
+  // Start with no story opened so zero section listeners attach on initial page load
+  const [activeSessionId, setActiveSessionId] = useState<string>('');
+  const [lastOpenedStoryId, setLastOpenedStoryId] = useState<string>(() => loadActiveSessionId(''));
   const [sections, setSections] = useState<ManuscriptSection[]>([]);
-  const [sectionsLoaded, setSectionsLoaded] = useState(false);
+  const [sectionsLoaded, setSectionsLoaded] = useState(true);
 
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(() => {
     if (typeof window !== 'undefined' && window.innerWidth < 1024) {
@@ -145,21 +160,35 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   const bootstrappedRef = useRef<boolean>(false);
   const initialPurgeRanRef = useRef<boolean>(false);
 
+  // Merge live top-30 stories with any paginated older stories (live docs take precedence)
+  const loadedStories = useMemo(() => {
+    const byId = new Map<string, StorySession>();
+    for (const story of recentStories) {
+      byId.set(story.id, story);
+    }
+    for (const story of olderStories) {
+      if (!byId.has(story.id)) {
+        byId.set(story.id, story);
+      }
+    }
+    return Array.from(byId.values()).sort(
+      (a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt),
+    );
+  }, [recentStories, olderStories]);
+
   const activeStories = useMemo(
-    () => allStories.filter((s) => !s.isDeleted),
-    [allStories],
-  );
-  const trashedStories = useMemo(
-    () =>
-      allStories
-        .filter((s) => s.isDeleted)
-        .sort(
-          (a, b) =>
-            Date.parse(b.deletedAt || b.updatedAt) - Date.parse(a.deletedAt || a.updatedAt),
-        ),
-    [allStories],
+    () => loadedStories.filter((s) => !s.isDeleted),
+    [loadedStories],
   );
 
+  const allKnownStories = useMemo(() => {
+    const byId = new Map<string, StorySession>();
+    for (const s of loadedStories) byId.set(s.id, s);
+    for (const s of trashedStories) byId.set(s.id, s);
+    return Array.from(byId.values());
+  }, [loadedStories, trashedStories]);
+
+  const hasMoreStories = olderHasMore !== null ? olderHasMore : recentHasMore;
   const trashCount = trashedStories.length + trashedSections.length;
 
   const showToast = useCallback((message: string) => {
@@ -215,109 +244,34 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     };
   }, []);
 
-  // Real-time Firestore listener for all stories under users/{uid}/stories
+  // Real-time Firestore listener for only the 30 most recent lightweight story metadata docs
   useEffect(() => {
     bootstrappedRef.current = false;
     initialPurgeRanRef.current = false;
+    recentLastDocRef.current = null;
+    olderLastDocRef.current = null;
+    setRecentStories([]);
+    setRecentHasMore(false);
+    setOlderStories([]);
+    setOlderHasMore(null);
     setStoriesLoaded(false);
 
-    const unsubscribe = subscribeToStories(
+    const unsubscribe = subscribeToRecentStories(
       uid,
-      async (cloudStories) => {
-        setAllStories(cloudStories);
+      STORIES_PAGE_SIZE,
+      ({ stories, hasMore, lastDoc }) => {
+        setRecentStories(stories);
+        setRecentHasMore(hasMore);
+        recentLastDocRef.current = lastDoc;
         setStoriesLoaded(true);
 
-        const nonDeleted = cloudStories.filter((s) => !s.isDeleted);
-
-        if (cloudStories.length === 0 && !bootstrappedRef.current) {
-          bootstrappedRef.current = true;
-          try {
-            await trackSync(async () => {
-              let imported = false;
-              try {
-                const alreadyMigrated = localStorage.getItem(MIGRATED_FLAG_KEY) === 'true';
-                const legacyRaw = localStorage.getItem(LEGACY_SESSIONS_KEY);
-                if (!alreadyMigrated && legacyRaw) {
-                  const legacyParsed = JSON.parse(legacyRaw) as StorySession[];
-                  const meaningful = Array.isArray(legacyParsed)
-                    ? legacyParsed.filter(
-                        (s) =>
-                          (Array.isArray(s.sections) && s.sections.length > 0) ||
-                          (s.title && s.title.trim() && s.title.trim() !== 'Untitled Story'),
-                      )
-                    : [];
-
-                  if (meaningful.length > 0) {
-                    for (const legacyStory of meaningful) {
-                      const newStoryId = createId('story');
-                      await createStoryInCloud(uid, {
-                        storyId: newStoryId,
-                        title: legacyStory.title || 'Untitled Story',
-                        defaultStyle: legacyStory.defaultStyle || 'colloquial',
-                        defaultRefinedEnding: legacyStory.defaultRefinedEnding || 'colloquial',
-                        defaultModel: legacyStory.defaultModel || 'gemini-2.5-flash',
-                      });
-
-                      const legacySections = sortSectionsChronologically(
-                        legacyStory.sections || [],
-                      );
-                      let secCount = 0;
-                      for (let i = 0; i < legacySections.length; i++) {
-                        const sec = legacySections[i];
-                        const secId = createId('sec');
-                        const versions = getSectionVersions(sec);
-                        const initialVersion = versions[0];
-                        secCount += 1;
-                        await createSectionInCloud(uid, newStoryId, {
-                          sectionId: secId,
-                          order: Date.parse(sec.createdAt) || Date.now() + i,
-                          initialVersion,
-                          audioId: sec.audioId,
-                          audioMeta: sec.audioMeta,
-                          nextSectionCount: secCount,
-                        });
-                        if (versions.length > 1) {
-                          await appendSectionVersionInCloud(uid, newStoryId, secId, versions);
-                        }
-                      }
-                    }
-                    localStorage.setItem(MIGRATED_FLAG_KEY, 'true');
-                    imported = true;
-                    showToast('Imported local stories to Firebase Cloud');
-                  }
-                }
-              } catch {
-                // Ignore legacy migration errors and fall back to fresh story
-              }
-
-              if (!imported) {
-                const freshId = createId('story');
-                await createStoryInCloud(uid, {
-                  storyId: freshId,
-                  title: 'Untitled Story',
-                  defaultStyle: 'colloquial',
-                  defaultRefinedEnding: 'colloquial',
-                  defaultModel: 'gemini-2.5-flash',
-                });
-                setActiveSessionId(freshId);
-              }
-            });
-          } catch (err) {
-            setGlobalError(formatCloudErrorMessage(err));
-          }
-          return;
-        }
-
-        if (nonDeleted.length > 0) {
-          setActiveSessionId((prevId) => {
-            if (prevId && nonDeleted.some((s) => s.id === prevId)) {
-              return prevId;
-            }
-            return nonDeleted[0].id;
-          });
-        } else {
-          setActiveSessionId('');
-        }
+        // If the currently open story was soft-deleted, clear selection
+        setActiveSessionId((prevId) => {
+          if (!prevId) return '';
+          const match = stories.find((s) => s.id === prevId);
+          if (match && match.isDeleted) return '';
+          return prevId;
+        });
       },
       (err) => {
         setStoriesLoaded(true);
@@ -326,7 +280,111 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     );
 
     return () => unsubscribe();
-  }, [uid, showToast, trackSync]);
+  }, [uid]);
+
+  // Lightweight single-field listener for soft-deleted stories (keeps Trash count & cleanup accurate at 1,000+ stories)
+  useEffect(() => {
+    setTrashedStoriesLoaded(false);
+    const unsubscribe = subscribeToTrashedStories(
+      uid,
+      (items) => {
+        setTrashedStories(items);
+        setTrashedStoriesLoaded(true);
+      },
+      (err) => {
+        setTrashedStoriesLoaded(true);
+        setGlobalError(formatCloudErrorMessage(err));
+      },
+    );
+    return () => unsubscribe();
+  }, [uid]);
+
+  // First-time bootstrap only when the account genuinely has zero active and zero trashed stories
+  useEffect(() => {
+    if (!storiesLoaded || !trashedStoriesLoaded) return;
+    if (bootstrappedRef.current) return;
+    if (recentStories.length > 0 || trashedStories.length > 0) {
+      bootstrappedRef.current = true;
+      return;
+    }
+
+    bootstrappedRef.current = true;
+    void (async () => {
+      try {
+        await trackSync(async () => {
+          let imported = false;
+          try {
+            const alreadyMigrated = localStorage.getItem(MIGRATED_FLAG_KEY) === 'true';
+            const legacyRaw = localStorage.getItem(LEGACY_SESSIONS_KEY);
+            if (!alreadyMigrated && legacyRaw) {
+              const legacyParsed = JSON.parse(legacyRaw) as StorySession[];
+              const meaningful = Array.isArray(legacyParsed)
+                ? legacyParsed.filter(
+                    (s) =>
+                      (Array.isArray(s.sections) && s.sections.length > 0) ||
+                      (s.title && s.title.trim() && s.title.trim() !== 'Untitled Story'),
+                  )
+                : [];
+
+              if (meaningful.length > 0) {
+                for (const legacyStory of meaningful) {
+                  const newStoryId = createId('story');
+                  await createStoryInCloud(uid, {
+                    storyId: newStoryId,
+                    title: legacyStory.title || 'Untitled Story',
+                    defaultStyle: legacyStory.defaultStyle || 'colloquial',
+                    defaultRefinedEnding: legacyStory.defaultRefinedEnding || 'colloquial',
+                    defaultModel: legacyStory.defaultModel || 'gemini-2.5-flash',
+                  });
+
+                  const legacySections = sortSectionsChronologically(legacyStory.sections || []);
+                  let secCount = 0;
+                  for (let i = 0; i < legacySections.length; i++) {
+                    const sec = legacySections[i];
+                    const secId = createId('sec');
+                    const versions = getSectionVersions(sec);
+                    const initialVersion = versions[0];
+                    secCount += 1;
+                    await createSectionInCloud(uid, newStoryId, {
+                      sectionId: secId,
+                      order: Date.parse(sec.createdAt) || Date.now() + i,
+                      initialVersion,
+                      audioId: sec.audioId,
+                      audioMeta: sec.audioMeta,
+                      nextSectionCount: secCount,
+                    });
+                    if (versions.length > 1) {
+                      await appendSectionVersionInCloud(uid, newStoryId, secId, versions);
+                    }
+                  }
+                }
+                localStorage.setItem(MIGRATED_FLAG_KEY, 'true');
+                imported = true;
+                showToast('Imported local stories to Firebase Cloud');
+              }
+            }
+          } catch {
+            // Ignore legacy migration errors and fall back to fresh story
+          }
+
+          if (!imported) {
+            const freshId = createId('story');
+            await createStoryInCloud(uid, {
+              storyId: freshId,
+              title: 'Untitled Story',
+              defaultStyle: 'colloquial',
+              defaultRefinedEnding: 'colloquial',
+              defaultModel: 'gemini-2.5-flash',
+            });
+            setActiveSessionId(freshId);
+            setLastOpenedStoryId(freshId);
+          }
+        });
+      } catch (err) {
+        setGlobalError(formatCloudErrorMessage(err));
+      }
+    })();
+  }, [uid, storiesLoaded, trashedStoriesLoaded, recentStories.length, trashedStories.length, showToast, trackSync]);
 
   // Real-time Firestore listener for individually trashed sections under users/{uid}/trashedSections
   useEffect(() => {
@@ -348,33 +406,33 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   // Automatic 30-day permanent cleanup helper
   const runExpiredTrashCleanup = useCallback(async () => {
     if (trashedStories.length === 0 && trashedSections.length === 0) return;
-    const allIds = new Set(allStories.map((s) => s.id));
+    const allIds = new Set(allKnownStories.map((s) => s.id));
     const purged = await purgeExpiredTrashInCloud(uid, trashedStories, trashedSections, allIds);
     if (purged > 0) {
       showToast(
         `Auto-cleaned ${purged} expired Trash ${purged === 1 ? 'item' : 'items'} (> 30 days)`,
       );
     }
-  }, [uid, allStories, trashedStories, trashedSections, showToast]);
+  }, [uid, allKnownStories, trashedStories, trashedSections, showToast]);
 
   // Run automatic 30-day cleanup on initial app load once Trash data arrives
   useEffect(() => {
-    if (!storiesLoaded || !trashedSectionsLoaded) return;
+    if (!storiesLoaded || !trashedStoriesLoaded || !trashedSectionsLoaded) return;
     if (initialPurgeRanRef.current) return;
     initialPurgeRanRef.current = true;
     void runExpiredTrashCleanup();
-  }, [storiesLoaded, trashedSectionsLoaded, runExpiredTrashCleanup]);
+  }, [storiesLoaded, trashedStoriesLoaded, trashedSectionsLoaded, runExpiredTrashCleanup]);
 
   // Also run automatic 30-day cleanup whenever the user opens the Trash view
   useEffect(() => {
-    if (activeView === 'trash' && storiesLoaded && trashedSectionsLoaded) {
+    if (activeView === 'trash' && storiesLoaded && trashedStoriesLoaded && trashedSectionsLoaded) {
       void runExpiredTrashCleanup();
     }
-  }, [activeView, storiesLoaded, trashedSectionsLoaded, runExpiredTrashCleanup]);
+  }, [activeView, storiesLoaded, trashedStoriesLoaded, trashedSectionsLoaded, runExpiredTrashCleanup]);
 
-  // Real-time Firestore listener for active story's active (non-deleted) sections
+  // Lazy-loaded real-time listener for sections: ONLY attaches when a story is actively opened
   useEffect(() => {
-    if (!activeSessionId) {
+    if (!activeSessionId || activeView !== 'story') {
       setSections([]);
       setSectionsLoaded(true);
       return;
@@ -401,12 +459,43 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     );
 
     return () => unsubscribe();
-  }, [uid, activeSessionId]);
+  }, [uid, activeSessionId, activeView]);
 
   const activeSession = useMemo(
-    () => activeStories.find((s) => s.id === activeSessionId) ?? activeStories[0] ?? null,
+    () => (activeSessionId ? activeStories.find((s) => s.id === activeSessionId) ?? null : null),
     [activeStories, activeSessionId],
   );
+
+  // Suggested story for 1-click resume on the clean initial screen (without eagerly fetching sections)
+  const suggestedResumeStory = useMemo(() => {
+    if (activeStories.length === 0) return null;
+    if (lastOpenedStoryId) {
+      const remembered = activeStories.find((s) => s.id === lastOpenedStoryId);
+      if (remembered) return remembered;
+    }
+    return activeStories[0];
+  }, [activeStories, lastOpenedStoryId]);
+
+  const handleLoadOlderStories = async () => {
+    const cursor = olderLastDocRef.current ?? recentLastDocRef.current;
+    if (!cursor || isLoadingMoreStories) return;
+    setIsLoadingMoreStories(true);
+    setGlobalError(null);
+    try {
+      const page = await fetchOlderStoriesPage(uid, cursor, STORIES_PAGE_SIZE);
+      setOlderStories((prev) => {
+        const seen = new Set(prev.map((s) => s.id));
+        const additions = page.stories.filter((s) => !seen.has(s.id));
+        return [...prev, ...additions];
+      });
+      olderLastDocRef.current = page.lastDoc;
+      setOlderHasMore(page.hasMore);
+    } catch (err) {
+      setGlobalError(formatCloudErrorMessage(err));
+    } finally {
+      setIsLoadingMoreStories(false);
+    }
+  };
 
   // Sync local title input with remote Firestore title when not actively editing
   useEffect(() => {
@@ -506,6 +595,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       );
       titleDirtyRef.current = false;
       setActiveSessionId(freshId);
+      setLastOpenedStoryId(freshId);
       setActiveView('story');
     } catch (err) {
       setGlobalError(formatCloudErrorMessage(err));
@@ -572,7 +662,12 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
 
     try {
       if (pendingConfirm.kind === 'trash_story') {
-        await trackSync(() => moveStoryToTrashInCloud(uid, pendingConfirm.story.id));
+        const trashedId = pendingConfirm.story.id;
+        await trackSync(() => moveStoryToTrashInCloud(uid, trashedId));
+        setOlderStories((prev) => prev.filter((s) => s.id !== trashedId));
+        if (activeSessionId === trashedId) {
+          setActiveSessionId('');
+        }
         showToast('Moved story to Trash (recoverable for 30 days)');
       } else if (pendingConfirm.kind === 'trash_section') {
         if (!activeSession) return;
@@ -589,12 +684,16 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
         );
         showToast('Moved section to Trash (recoverable for 30 days)');
       } else if (pendingConfirm.kind === 'delete_story_forever') {
-        setTrashBusyItemId(pendingConfirm.story.id);
-        await trackSync(() => permanentlyDeleteStoryInCloud(uid, pendingConfirm.story.id));
+        const deletedId = pendingConfirm.story.id;
+        setTrashBusyItemId(deletedId);
+        await trackSync(() => permanentlyDeleteStoryInCloud(uid, deletedId));
+        setOlderStories((prev) => prev.filter((s) => s.id !== deletedId));
         showToast('Story permanently deleted');
       } else if (pendingConfirm.kind === 'delete_section_forever') {
         setTrashBusyItemId(pendingConfirm.section.id);
-        const parentExists = allStories.some((s) => s.id === pendingConfirm.section.parentStoryId);
+        const parentExists = allKnownStories.some(
+          (s) => s.id === pendingConfirm.section.parentStoryId,
+        );
         if (pendingConfirm.section.audioId) {
           deleteAudioClip(pendingConfirm.section.audioId).catch(() => undefined);
         }
@@ -618,7 +717,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     setGlobalError(null);
     try {
       await trackSync(() => restoreStoryFromTrashInCloud(uid, story.id));
-      setActiveSessionId(story.id);
+      setLastOpenedStoryId(story.id);
       showToast(`Restored "${story.title || 'Untitled Story'}"`);
     } catch (err) {
       setGlobalError(formatCloudErrorMessage(err));
@@ -633,7 +732,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     setGlobalError(null);
     try {
       const result = await trackSync(() =>
-        restoreSectionFromTrashInCloud(uid, trashed, allStories),
+        restoreSectionFromTrashInCloud(uid, trashed, allKnownStories),
       );
       showToast(
         result.usedFallbackStory
@@ -1026,6 +1125,8 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
         activeSectionCount={orderedSections.length}
         activeView={activeView}
         trashCount={trashCount}
+        hasMoreStories={hasMoreStories}
+        isLoadingMoreStories={isLoadingMoreStories}
         isOpen={sidebarOpen}
         userEmail={user.email}
         onSignOut={() => {
@@ -1036,12 +1137,16 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
         onSelectSession={(id) => {
           titleDirtyRef.current = false;
           setActiveSessionId(id);
+          setLastOpenedStoryId(id);
           setActiveView('story');
           setGlobalError(null);
         }}
         onSelectTrash={() => {
           setActiveView('trash');
           setGlobalError(null);
+        }}
+        onLoadOlderStories={() => {
+          void handleLoadOlderStories();
         }}
         onCreateSession={() => {
           void handleCreateSession();
@@ -1092,7 +1197,9 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
               <span className="truncate font-medium text-[#374151]">
                 {activeView === 'trash'
                   ? 'Trash'
-                  : titleDraft || activeSession?.title || 'Untitled Story'}
+                  : activeSession
+                    ? titleDraft || activeSession.title || 'Untitled Story'
+                    : 'Stories'}
               </span>
 
               {/* Minimal Cloud Sync / Upload Indicator */}
@@ -1222,30 +1329,76 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
             />
           ) : !activeSession ? (
             <div className="mx-auto flex max-w-[780px] flex-col items-center justify-center px-5 py-20 text-center sm:px-10">
-              <p className="text-sm font-medium text-[#374151]">No active stories</p>
-              <p className="mt-1 text-xs text-[#6B7280]">
-                Start a new story or restore a deleted story from Trash.
-              </p>
-              <div className="mt-5 flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    void handleCreateSession();
-                  }}
-                  className="rounded-lg bg-[#4338CA] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[#3730A3]"
-                >
-                  New Story
-                </button>
-                {trashCount > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => setActiveView('trash')}
-                    className="rounded-lg border border-[#E5E7EB] bg-white px-4 py-2 text-xs font-medium text-[#374151] transition-colors hover:bg-[#F9FAFB]"
-                  >
-                    Open Trash ({trashCount})
-                  </button>
-                )}
-              </div>
+              {activeStories.length > 0 ? (
+                <>
+                  <p className="text-sm font-medium text-[#374151]">Select a story to open</p>
+                  <p className="mt-1 text-xs text-[#6B7280]">
+                    Pick any story from the sidebar to load its sections, or start a new one.
+                  </p>
+                  <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
+                    {suggestedResumeStory && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          titleDirtyRef.current = false;
+                          setActiveSessionId(suggestedResumeStory.id);
+                          setLastOpenedStoryId(suggestedResumeStory.id);
+                          setActiveView('story');
+                          setGlobalError(null);
+                        }}
+                        className="max-w-[280px] truncate rounded-lg bg-[#4338CA] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[#3730A3]"
+                      >
+                        Open {suggestedResumeStory.title || 'Untitled Story'}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void handleCreateSession();
+                      }}
+                      className="rounded-lg border border-[#E5E7EB] bg-white px-4 py-2 text-xs font-medium text-[#374151] transition-colors hover:bg-[#F9FAFB]"
+                    >
+                      New Story
+                    </button>
+                    {!sidebarOpen && (
+                      <button
+                        type="button"
+                        onClick={() => setSidebarOpen(true)}
+                        className="rounded-lg border border-[#E5E7EB] bg-white px-4 py-2 text-xs font-medium text-[#374151] transition-colors hover:bg-[#F9FAFB]"
+                      >
+                        Browse Stories
+                      </button>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p className="text-sm font-medium text-[#374151]">No active stories</p>
+                  <p className="mt-1 text-xs text-[#6B7280]">
+                    Start a new story or restore a deleted story from Trash.
+                  </p>
+                  <div className="mt-5 flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void handleCreateSession();
+                      }}
+                      className="rounded-lg bg-[#4338CA] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[#3730A3]"
+                    >
+                      New Story
+                    </button>
+                    {trashCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setActiveView('trash')}
+                        className="rounded-lg border border-[#E5E7EB] bg-white px-4 py-2 text-xs font-medium text-[#374151] transition-colors hover:bg-[#F9FAFB]"
+                      >
+                        Open Trash ({trashCount})
+                      </button>
+                    )}
+                  </div>
+                </>
+              )}
             </div>
           ) : (
             <div className="mx-auto max-w-[780px] px-5 py-6 sm:px-10 sm:py-8">

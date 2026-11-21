@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, LogOut, PanelLeftClose, Pencil, Plus, Trash2, X } from 'lucide-react';
+import { Check, Loader2, LogOut, PanelLeftClose, Pencil, Plus, Trash2, X } from 'lucide-react';
 import type { StorySession } from '../types.ts';
 import { STYLE_SHORT_LABELS } from '../types.ts';
 import { formatTimestamp } from '../lib/format.ts';
@@ -11,6 +11,8 @@ interface SidebarProps {
   activeSectionCount: number;
   activeView: 'story' | 'trash';
   trashCount: number;
+  hasMoreStories?: boolean;
+  isLoadingMoreStories?: boolean;
   isOpen: boolean;
   userEmail?: string | null;
   onSignOut: () => void;
@@ -18,6 +20,7 @@ interface SidebarProps {
   onToggleDesktop: () => void;
   onSelectSession: (id: string) => void;
   onSelectTrash: () => void;
+  onLoadOlderStories?: () => void;
   onCreateSession: () => void;
   onRenameSession: (id: string, title: string) => void;
   onDeleteSession: (id: string) => void;
@@ -29,6 +32,8 @@ export function Sidebar({
   activeSectionCount,
   activeView,
   trashCount,
+  hasMoreStories = false,
+  isLoadingMoreStories = false,
   isOpen,
   userEmail,
   onSignOut,
@@ -36,6 +41,7 @@ export function Sidebar({
   onToggleDesktop,
   onSelectSession,
   onSelectTrash,
+  onLoadOlderStories,
   onCreateSession,
   onRenameSession,
   onDeleteSession,
@@ -123,7 +129,10 @@ export function Sidebar({
 
       {/* Stories list */}
       <div className="px-4 pb-2 pt-1">
-        <p className="text-xs font-medium text-[#6B7280]">Stories ({sessions.length})</p>
+        <p className="text-xs font-medium text-[#6B7280]">
+          Stories ({sessions.length}
+          {hasMoreStories ? '+' : ''})
+        </p>
       </div>
 
       <nav className="flex-1 space-y-1 overflow-y-auto px-2.5 pb-4" aria-label="Saved stories">
@@ -229,6 +238,26 @@ export function Sidebar({
             </div>
           );
         })}
+
+        {hasMoreStories && onLoadOlderStories && (
+          <div className="px-1 pt-2">
+            <button
+              type="button"
+              disabled={isLoadingMoreStories}
+              onClick={onLoadOlderStories}
+              className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-[#E5E7EB] bg-white px-3 py-2 text-xs font-medium text-[#4B5563] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-wait disabled:opacity-60"
+            >
+              {isLoadingMoreStories ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-[#4338CA]" />
+                  <span>Loading older stories…</span>
+                </>
+              ) : (
+                <span>Load older stories</span>
+              )}
+            </button>
+          </div>
+        )}
       </nav>
 
       {/* 30-Day Trash Bin Navigation */}

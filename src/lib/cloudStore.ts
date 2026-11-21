@@ -5,13 +5,18 @@ import {
   doc,
   getDoc,
   getDocs,
+  limit,
   onSnapshot,
+  orderBy,
   query,
   serverTimestamp,
   setDoc,
+  startAfter,
   updateDoc,
   where,
   writeBatch,
+  type DocumentData,
+  type QueryDocumentSnapshot,
   type Unsubscribe,
 } from 'firebase/firestore';
 import {
@@ -301,23 +306,106 @@ function parseTrashedSectionDoc(id: string, data: Record<string, unknown>): Tras
 }
 
 // ---------------------------------------------------------------------------
-// Real-time Firestore Subscriptions (onSnapshot)
+// Real-time Firestore Subscriptions (onSnapshot) & Cursor Pagination
 // ---------------------------------------------------------------------------
 
-export function subscribeToStories(
+export const STORIES_PAGE_SIZE = 30;
+
+export type StoryCursor = QueryDocumentSnapshot<DocumentData>;
+
+export interface StoriesPageResult {
+  stories: StorySession[];
+  hasMore: boolean;
+  lastDoc: StoryCursor | null;
+}
+
+/**
+ * Subscribes only to the lightweight story metadata list for the most recent
+ * `pageSize` stories (default 30), ordered by `updatedAt` descending.
+ * Served directly from persistent IndexedDB cache on refresh, syncing deltas only.
+ */
+export function subscribeToRecentStories(
+  uid: string,
+  pageSize: number,
+  onData: (result: StoriesPageResult) => void,
+  onError: (err: Error) => void,
+): Unsubscribe {
+  const path = `users/${uid}/stories`;
+  const q = query(
+    collection(db, path),
+    orderBy('updatedAt', 'desc'),
+    limit(pageSize + 1),
+  );
+
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const hasMore = snapshot.docs.length > pageSize;
+      const pageDocs = hasMore ? snapshot.docs.slice(0, pageSize) : snapshot.docs;
+      const stories = pageDocs.map((docSnap) => parseStoryDoc(docSnap.id, docSnap.data()));
+      const lastDoc = pageDocs.length > 0 ? pageDocs[pageDocs.length - 1] : null;
+      onData({ stories, hasMore, lastDoc });
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.LIST, path);
+      } catch (wrapped) {
+        onError(wrapped instanceof Error ? wrapped : new Error(String(wrapped)));
+      }
+    },
+  );
+}
+
+/**
+ * Loads the next page of older story metadata documents on demand when the user
+ * clicks "Load older stories" in the sidebar.
+ */
+export async function fetchOlderStoriesPage(
+  uid: string,
+  afterCursor: StoryCursor,
+  pageSize = STORIES_PAGE_SIZE,
+): Promise<StoriesPageResult> {
+  const path = `users/${uid}/stories`;
+  try {
+    const q = query(
+      collection(db, path),
+      orderBy('updatedAt', 'desc'),
+      startAfter(afterCursor),
+      limit(pageSize + 1),
+    );
+    const snapshot = await getDocs(q);
+    const hasMore = snapshot.docs.length > pageSize;
+    const pageDocs = hasMore ? snapshot.docs.slice(0, pageSize) : snapshot.docs;
+    const stories = pageDocs.map((docSnap) => parseStoryDoc(docSnap.id, docSnap.data()));
+    const lastDoc = pageDocs.length > 0 ? pageDocs[pageDocs.length - 1] : null;
+    return { stories, hasMore, lastDoc };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, path);
+  }
+}
+
+/**
+ * Lightweight single-field query for soft-deleted stories in the 30-day Trash Bin.
+ * Ensures Trash count and automatic 30-day expiry cleanup remain accurate even when
+ * the user has 1,000+ active stories.
+ */
+export function subscribeToTrashedStories(
   uid: string,
   onData: (stories: StorySession[]) => void,
   onError: (err: Error) => void,
 ): Unsubscribe {
   const path = `users/${uid}/stories`;
-  const q = query(collection(db, path), where('ownerId', '==', uid));
+  const q = query(collection(db, path), where('isDeleted', '==', true));
 
   return onSnapshot(
     q,
     (snapshot) => {
       const stories = snapshot.docs
         .map((docSnap) => parseStoryDoc(docSnap.id, docSnap.data()))
-        .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+        .sort(
+          (a, b) =>
+            Date.parse(b.deletedAt || b.updatedAt) - Date.parse(a.deletedAt || a.updatedAt),
+        );
       onData(stories);
     },
     (error) => {
@@ -761,9 +849,24 @@ export async function restoreSectionFromTrashInCloud(
   allStories: StorySession[],
 ): Promise<{ restoredStoryId: string; restoredStoryTitle: string; usedFallbackStory: boolean }> {
   const trashPath = `users/${uid}/trashedSections/${trashed.id}`;
-  const parentStory = allStories.find(
+  let parentStory = allStories.find(
     (s) => s.id === trashed.parentStoryId && !s.isDeleted,
   );
+
+  // If the original parent story wasn't in the currently loaded page, verify it directly
+  if (!parentStory && trashed.parentStoryId && trashed.parentStoryId !== 'unknown') {
+    try {
+      const parentSnap = await getDoc(doc(db, `users/${uid}/stories/${trashed.parentStoryId}`));
+      if (parentSnap.exists()) {
+        const parsedParent = parseStoryDoc(parentSnap.id, parentSnap.data());
+        if (!parsedParent.isDeleted) {
+          parentStory = parsedParent;
+        }
+      }
+    } catch {
+      // Ignore lookup failures and fall back cleanly
+    }
+  }
 
   // Case 1: Original parent story still exists and is active -> restore section in place
   if (parentStory) {
