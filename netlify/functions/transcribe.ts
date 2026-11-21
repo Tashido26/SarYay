@@ -1,5 +1,10 @@
 import { formatApiError, transcribeAudioBuffer } from '../../shared/geminiService.ts';
-import type { GeminiModel, ProcessingMode, WritingStyle } from '../../shared/geminiService.ts';
+import type {
+  GeminiModel,
+  ProcessingMode,
+  VoiceEnding,
+  WritingStyle,
+} from '../../shared/geminiService.ts';
 import { verifyAuthorizedRequest } from '../../shared/verifyFirebaseAuth.ts';
 
 export const config = {
@@ -31,14 +36,19 @@ export default async (req: Request): Promise<Response> => {
     const buffer = Buffer.from(arrayBuffer);
 
     const style = String(formData.get('style') || 'literary') as WritingStyle;
+    const refinedEnding = String(formData.get('refinedEnding') || 'colloquial') as VoiceEnding;
     const model = String(formData.get('model') || 'gemini-2.5-flash') as GeminiModel;
     const mode = String(formData.get('mode') || 'full_polish') as ProcessingMode;
 
     const result = await transcribeAudioBuffer({
       buffer,
       rawMimeType: audioEntry.type || undefined,
-      filename: 'name' in audioEntry && typeof audioEntry.name === 'string' ? audioEntry.name : 'recording.webm',
+      filename:
+        'name' in audioEntry && typeof audioEntry.name === 'string'
+          ? audioEntry.name
+          : 'recording.webm',
       style,
+      refinedEnding,
       model,
       mode,
     });

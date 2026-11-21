@@ -1,9 +1,10 @@
-import type { GeminiModel, ProcessingMode, WritingStyle } from '../types.ts';
+import type { GeminiModel, ProcessingMode, VoiceEnding, WritingStyle } from '../types.ts';
 import { getAuthIdToken } from './firebase.ts';
 
 export interface TranscribeResponse {
   text: string;
   style: WritingStyle;
+  refinedEnding?: VoiceEnding;
   model: GeminiModel;
   mode?: ProcessingMode;
 }
@@ -32,6 +33,7 @@ export async function transcribeAudioApi(params: {
   blob: Blob;
   filename: string;
   style: WritingStyle;
+  refinedEnding?: VoiceEnding;
   model: GeminiModel;
   mode?: ProcessingMode;
   signal?: AbortSignal;
@@ -43,6 +45,7 @@ export async function transcribeAudioApi(params: {
   });
   formData.append('audio', file);
   formData.append('style', params.style);
+  formData.append('refinedEnding', params.refinedEnding ?? 'colloquial');
   formData.append('model', params.model);
   formData.append('mode', params.mode ?? 'full_polish');
 
@@ -61,7 +64,9 @@ export async function transcribeAudioApi(params: {
 
   const data = (await response.json()) as TranscribeResponse;
   if (!data.text || !data.text.trim()) {
-    throw new Error('No speech text was returned from transcription. Please verify your audio contains audible speech.');
+    throw new Error(
+      'No speech text was returned from transcription. Please verify your audio contains audible speech.',
+    );
   }
   return data;
 }
@@ -69,6 +74,7 @@ export async function transcribeAudioApi(params: {
 export async function restyleTextApi(params: {
   text: string;
   style: WritingStyle;
+  refinedEnding?: VoiceEnding;
   model: GeminiModel;
   mode?: ProcessingMode;
   signal?: AbortSignal;
@@ -83,6 +89,7 @@ export async function restyleTextApi(params: {
     body: JSON.stringify({
       text: params.text,
       style: params.style,
+      refinedEnding: params.refinedEnding ?? 'colloquial',
       model: params.model,
       mode: params.mode ?? 'full_polish',
     }),

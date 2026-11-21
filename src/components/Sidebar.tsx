@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Check, LogOut, PanelLeftClose, Pencil, Plus, Trash2, X } from 'lucide-react';
 import type { StorySession } from '../types.ts';
-import { STYLE_LABELS } from '../types.ts';
+import { STYLE_SHORT_LABELS } from '../types.ts';
 import { formatTimestamp } from '../lib/format.ts';
 
 interface SidebarProps {
@@ -116,7 +116,7 @@ export function Sidebar({
           const isEditing = editingId === session.id;
           const isConfirmingDelete = confirmDeleteId === session.id;
           const sectionCount = session.sections.length;
-          const styleShort = STYLE_LABELS[session.defaultStyle].replace(' Style', '');
+          const styleShort = STYLE_SHORT_LABELS[session.defaultStyle] ?? 'Colloquial';
 
           return (
             <div

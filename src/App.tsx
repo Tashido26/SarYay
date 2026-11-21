@@ -17,9 +17,10 @@ import type {
   ProcessingMode,
   StagedAudio,
   StorySession,
+  VoiceEnding,
   WritingStyle,
 } from './types.ts';
-import { MODEL_LABELS, STYLE_LABELS } from './types.ts';
+import { MODEL_LABELS, formatStyleWithEnding } from './types.ts';
 import { deleteAudioClip, deleteAudioClips, getAudioClip, saveAudioClip } from './lib/audioDb.ts';
 import { restyleTextApi, transcribeAudioApi } from './lib/api.ts';
 import {
@@ -177,9 +178,15 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     updateActiveSession((session) => ({ ...session, defaultStyle: style }));
   };
 
+  const handleRefinedEndingChange = (ending: VoiceEnding) => {
+    updateActiveSession((session) => ({ ...session, defaultRefinedEnding: ending }));
+  };
+
   const handleModelChange = (model: GeminiModel) => {
     updateActiveSession((session) => ({ ...session, defaultModel: model }));
   };
+
+  const activeRefinedEnding: VoiceEnding = activeSession.defaultRefinedEnding ?? 'colloquial';
 
   const handleTranscribeAudio = async (
     staged: StagedAudio,
@@ -188,12 +195,14 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   ) => {
     setGlobalError(null);
     const targetStyle = activeSession.defaultStyle;
+    const targetEnding = activeRefinedEnding;
     const targetModel = activeSession.defaultModel;
 
     const result = await transcribeAudioApi({
       blob: staged.blob,
       filename: staged.filename,
       style: targetStyle,
+      refinedEnding: targetEnding,
       model: targetModel,
       mode,
       signal,
@@ -215,6 +224,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       id: createId('sec'),
       content: result.text,
       style: targetStyle,
+      refinedEnding: targetStyle === 'refined_flow' ? targetEnding : undefined,
       model: targetModel,
       mode,
       audioId,
@@ -228,10 +238,11 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       sections: [...session.sections, newSection],
     }));
 
+    const styleDesc = formatStyleWithEnding(targetStyle, targetEnding);
     showToast(
       mode === 'summarize_structure'
-        ? `Structured summary added (${STYLE_LABELS[targetStyle]})`
-        : `Section added (${STYLE_LABELS[targetStyle]})`,
+        ? `Structured summary added (${styleDesc})`
+        : `Section added (${styleDesc})`,
     );
   };
 
@@ -245,12 +256,17 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     }));
   };
 
-  const handleReprocessStyle = async (section: ManuscriptSection, targetStyle: WritingStyle) => {
+  const handleReprocessStyle = async (
+    section: ManuscriptSection,
+    targetStyle: WritingStyle,
+    targetEnding?: VoiceEnding,
+  ) => {
     if (reprocessingSectionId) return;
     setGlobalError(null);
     setReprocessingSectionId(section.id);
     const chosenModel = activeSession.defaultModel;
     const sectionMode: ProcessingMode = section.mode ?? 'full_polish';
+    const resolvedEnding: VoiceEnding = targetEnding ?? activeRefinedEnding;
 
     try {
       let nextText = '';
@@ -263,6 +279,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
             blob: stored.blob,
             filename: stored.meta.filename,
             style: targetStyle,
+            refinedEnding: resolvedEnding,
             model: chosenModel,
             mode: sectionMode,
           });
@@ -275,6 +292,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
         const result = await restyleTextApi({
           text: section.content,
           style: targetStyle,
+          refinedEnding: resolvedEnding,
           model: chosenModel,
           mode: sectionMode,
         });
@@ -290,6 +308,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                 ...sec,
                 content: nextText,
                 style: targetStyle,
+                refinedEnding: targetStyle === 'refined_flow' ? resolvedEnding : undefined,
                 model: chosenModel,
                 updatedAt: now,
               }
@@ -297,10 +316,11 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
         ),
       }));
 
+      const styleDesc = formatStyleWithEnding(targetStyle, resolvedEnding);
       showToast(
         usedAudio
-          ? `Re-transcribed from audio in ${STYLE_LABELS[targetStyle]}`
-          : `Converted to ${STYLE_LABELS[targetStyle]}`,
+          ? `Re-transcribed from audio in ${styleDesc}`
+          : `Converted to ${styleDesc}`,
       );
     } catch (err) {
       const msg =
@@ -534,7 +554,9 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                 <span aria-hidden="true">·</span>
                 <span>{totalCharacters.toLocaleString()} characters</span>
                 <span aria-hidden="true">·</span>
-                <span>Default: {STYLE_LABELS[activeSession.defaultStyle]}</span>
+                <span>
+                  Default: {formatStyleWithEnding(activeSession.defaultStyle, activeRefinedEnding)}
+                </span>
                 <span aria-hidden="true">·</span>
                 <span>{MODEL_LABELS[activeSession.defaultModel]}</span>
               </div>
@@ -585,8 +607,10 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
               <DictationDock
                 storyTitle={activeSession.title}
                 style={activeSession.defaultStyle}
+                refinedEnding={activeRefinedEnding}
                 model={activeSession.defaultModel}
                 onStyleChange={handleStyleChange}
+                onRefinedEndingChange={handleRefinedEndingChange}
                 onModelChange={handleModelChange}
                 onTranscribe={handleTranscribeAudio}
                 hasSections={activeSession.sections.length > 0}

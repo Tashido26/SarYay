@@ -1,16 +1,35 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   Check,
+  ChevronDown,
   Copy,
   Headphones,
   Loader2,
   RefreshCw,
   Trash2,
 } from 'lucide-react';
-import type { GeminiModel, ManuscriptSection, WritingStyle } from '../types.ts';
-import { MODEL_LABELS, STYLE_LABELS } from '../types.ts';
+import type {
+  GeminiModel,
+  ManuscriptSection,
+  VoiceEnding,
+  WritingStyle,
+} from '../types.ts';
+import { MODEL_LABELS, formatStyleWithEnding } from '../types.ts';
 import { formatDuration, formatTimestamp } from '../lib/format.ts';
 import { AudioPlayerBar } from './AudioPlayerBar.tsx';
+
+interface ReprocessOption {
+  label: string;
+  style: WritingStyle;
+  refinedEnding?: VoiceEnding;
+}
+
+const REPROCESS_OPTIONS: ReprocessOption[] = [
+  { label: 'Colloquial Style', style: 'colloquial' },
+  { label: 'Literary Style', style: 'literary' },
+  { label: 'Refined Flow (Colloquial)', style: 'refined_flow', refinedEnding: 'colloquial' },
+  { label: 'Refined Flow (Literary)', style: 'refined_flow', refinedEnding: 'literary' },
+];
 
 interface SectionBlockProps {
   section: ManuscriptSection;
@@ -18,7 +37,11 @@ interface SectionBlockProps {
   activeModel: GeminiModel;
   isReprocessing: boolean;
   onUpdateContent: (sectionId: string, nextContent: string) => void;
-  onReprocessStyle: (section: ManuscriptSection, targetStyle: WritingStyle) => Promise<void>;
+  onReprocessStyle: (
+    section: ManuscriptSection,
+    targetStyle: WritingStyle,
+    targetEnding?: VoiceEnding,
+  ) => Promise<void>;
   onDeleteSection: (sectionId: string) => void;
   onCopyText: (text: string) => void;
 }
@@ -34,14 +57,13 @@ export function SectionBlock({
   onCopyText,
 }: SectionBlockProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const [showAudio, setShowAudio] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [saveLabel, setSaveLabel] = useState<'Saved' | 'Saving…'>('Saved');
   const saveTimerRef = useRef<number | null>(null);
-
-  const oppositeStyle: WritingStyle = section.style === 'literary' ? 'colloquial' : 'literary';
-  const oppositeShort = oppositeStyle === 'literary' ? 'Literary' : 'Colloquial';
 
   const syncTextareaHeight = () => {
     const el = textareaRef.current;
@@ -65,6 +87,24 @@ export function SectionBlock({
     };
   }, []);
 
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onMouseDown = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onMouseDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [menuOpen]);
+
   const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const value = e.target.value;
     setSaveLabel('Saving…');
@@ -83,6 +123,14 @@ export function SectionBlock({
     window.setTimeout(() => setCopied(false), 1800);
   };
 
+  const isCurrentOption = (opt: ReprocessOption) => {
+    if (opt.style !== section.style) return false;
+    if (opt.style === 'refined_flow') {
+      return (section.refinedEnding ?? 'colloquial') === (opt.refinedEnding ?? 'colloquial');
+    }
+    return true;
+  };
+
   return (
     <article
       className="group border-t border-[#E5E7EB] pt-7 pb-3 first:border-t-0 first:pt-2"
@@ -95,7 +143,7 @@ export function SectionBlock({
             Section {String(index + 1).padStart(2, '0')}
           </span>
           <span aria-hidden="true">·</span>
-          <span>{STYLE_LABELS[section.style]}</span>
+          <span>{formatStyleWithEnding(section.style, section.refinedEnding)}</span>
           {section.mode === 'summarize_structure' ? (
             <>
               <span aria-hidden="true">·</span>
@@ -156,25 +204,61 @@ export function SectionBlock({
             )}
           </button>
 
-          <button
-            type="button"
-            disabled={isReprocessing}
-            onClick={() => onReprocessStyle(section, oppositeStyle)}
-            title={`Re-process this section into ${STYLE_LABELS[oppositeStyle]} using ${MODEL_LABELS[activeModel]}`}
-            className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium text-[#4338CA] transition-colors duration-150 hover:bg-[#EEF2FF] hover:text-[#312E81] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-wait disabled:opacity-60"
-          >
-            {isReprocessing ? (
-              <>
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                <span>Re-processing…</span>
-              </>
-            ) : (
-              <>
-                <RefreshCw className="h-3.5 w-3.5" />
-                <span>Re-process as {oppositeShort}</span>
-              </>
+          {/* Re-process style menu supporting all 3 styles & Refined Flow endings */}
+          <div ref={menuRef} className="relative">
+            <button
+              type="button"
+              disabled={isReprocessing}
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+              onClick={() => setMenuOpen((prev) => !prev)}
+              title={`Re-process this section with a different style using ${MODEL_LABELS[activeModel]}`}
+              className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium text-[#4338CA] transition-colors duration-150 hover:bg-[#EEF2FF] hover:text-[#312E81] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-wait disabled:opacity-60"
+            >
+              {isReprocessing ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  <span>Re-processing…</span>
+                </>
+              ) : (
+                <>
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  <span>Re-process Style</span>
+                  <ChevronDown className="h-3 w-3 opacity-75" />
+                </>
+              )}
+            </button>
+
+            {menuOpen && !isReprocessing && (
+              <div
+                role="menu"
+                className="absolute right-0 z-20 mt-1.5 w-52 rounded-lg border border-[#E5E7EB] bg-white py-1 shadow-sm"
+              >
+                {REPROCESS_OPTIONS.map((opt) => {
+                  const active = isCurrentOption(opt);
+                  return (
+                    <button
+                      key={`${opt.style}-${opt.refinedEnding ?? 'default'}`}
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setMenuOpen(false);
+                        onReprocessStyle(section, opt.style, opt.refinedEnding);
+                      }}
+                      className={`flex w-full items-center justify-between px-3 py-2 text-left text-xs transition-colors ${
+                        active
+                          ? 'bg-[#EEF2FF]/70 font-medium text-[#312E81]'
+                          : 'text-[#374151] hover:bg-[#F8F9FA] hover:text-[#111827]'
+                      }`}
+                    >
+                      <span className="whitespace-nowrap">{opt.label}</span>
+                      {active ? <Check className="h-3.5 w-3.5 text-[#4338CA]" /> : null}
+                    </button>
+                  );
+                })}
+              </div>
             )}
-          </button>
+          </div>
 
           {confirmDelete ? (
             <div className="ml-1 inline-flex items-center gap-1">

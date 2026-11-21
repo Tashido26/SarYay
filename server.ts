@@ -10,7 +10,12 @@ import {
   restyleTextContent,
   transcribeAudioBuffer,
 } from './shared/geminiService.ts';
-import type { GeminiModel, ProcessingMode, WritingStyle } from './shared/geminiService.ts';
+import type {
+  GeminiModel,
+  ProcessingMode,
+  VoiceEnding,
+  WritingStyle,
+} from './shared/geminiService.ts';
 import { verifyAuthorizedRequest } from './shared/verifyFirebaseAuth.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -61,6 +66,7 @@ async function startServer(): Promise<void> {
         }
 
         const style = String(req.body?.style || 'literary') as WritingStyle;
+        const refinedEnding = String(req.body?.refinedEnding || 'colloquial') as VoiceEnding;
         const model = String(req.body?.model || 'gemini-2.5-flash') as GeminiModel;
         const mode = String(req.body?.mode || 'full_polish') as ProcessingMode;
 
@@ -69,6 +75,7 @@ async function startServer(): Promise<void> {
           rawMimeType: file.mimetype,
           filename: file.originalname,
           style,
+          refinedEnding,
           model,
           mode,
         });
@@ -85,10 +92,11 @@ async function startServer(): Promise<void> {
     try {
       const text = typeof req.body?.text === 'string' ? req.body.text : '';
       const style = String(req.body?.style || 'literary') as WritingStyle;
+      const refinedEnding = String(req.body?.refinedEnding || 'colloquial') as VoiceEnding;
       const model = String(req.body?.model || 'gemini-2.5-flash') as GeminiModel;
       const mode = String(req.body?.mode || 'full_polish') as ProcessingMode;
 
-      const result = await restyleTextContent({ text, style, model, mode });
+      const result = await restyleTextContent({ text, style, refinedEnding, model, mode });
       res.json(result);
     } catch (err) {
       const formatted = formatApiError(err);

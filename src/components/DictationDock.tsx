@@ -9,13 +9,21 @@ import {
   Wand2,
   X,
 } from 'lucide-react';
-import type { GeminiModel, ProcessingMode, StagedAudio, WritingStyle } from '../types.ts';
+import type {
+  GeminiModel,
+  ProcessingMode,
+  StagedAudio,
+  VoiceEnding,
+  WritingStyle,
+} from '../types.ts';
 import {
+  ENDING_LABELS,
   MODE_DESCRIPTIONS,
   MODE_LABELS,
   MODEL_LABELS,
   STYLE_DESCRIPTIONS,
   STYLE_LABELS,
+  formatStyleWithEnding,
 } from '../types.ts';
 import {
   buildRecordingFilename,
@@ -27,8 +35,10 @@ import { AudioPlayerBar } from './AudioPlayerBar.tsx';
 interface DictationDockProps {
   storyTitle: string;
   style: WritingStyle;
+  refinedEnding: VoiceEnding;
   model: GeminiModel;
   onStyleChange: (style: WritingStyle) => void;
+  onRefinedEndingChange: (ending: VoiceEnding) => void;
   onModelChange: (model: GeminiModel) => void;
   onTranscribe: (
     audio: StagedAudio,
@@ -66,8 +76,10 @@ function isSupportedAudioFile(file: File): boolean {
 export function DictationDock({
   storyTitle,
   style,
+  refinedEnding,
   model,
   onStyleChange,
+  onRefinedEndingChange,
   onModelChange,
   onTranscribe,
   hasSections,
@@ -423,14 +435,14 @@ export function DictationDock({
       }`}
     >
       {/* Pre-configured style & model toolbar above recorder */}
-      <div className="flex flex-col gap-3 border-b border-[#E5E7EB] px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-col gap-3 border-b border-[#E5E7EB] px-5 py-4 xl:flex-row xl:items-center xl:justify-between">
         <div className="flex flex-wrap items-center gap-3">
           <div
             role="radiogroup"
             aria-label="Output writing style"
-            className="inline-flex items-center rounded-lg bg-[#F3F4F6] p-1"
+            className="inline-flex flex-wrap items-center gap-0.5 rounded-lg bg-[#F3F4F6] p-1"
           >
-            {(['colloquial', 'literary'] as WritingStyle[]).map((option) => {
+            {(['colloquial', 'literary', 'refined_flow'] as WritingStyle[]).map((option) => {
               const active = style === option;
               return (
                 <button
@@ -439,6 +451,7 @@ export function DictationDock({
                   role="radio"
                   aria-checked={active}
                   disabled={isTranscribing}
+                  title={STYLE_DESCRIPTIONS[option]}
                   onClick={() => onStyleChange(option)}
                   className={`whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-all duration-150 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:opacity-60 ${
                     active
@@ -481,10 +494,47 @@ export function DictationDock({
         </div>
       </div>
 
-      {/* Style nuance caption */}
-      <div className="border-b border-[#F3F4F6] bg-[#FAFAFB] px-5 py-2 text-xs text-[#6B7280]">
-        <span className="font-medium text-[#374151]">{STYLE_LABELS[style]}:</span>{' '}
-        {STYLE_DESCRIPTIONS[style]}
+      {/* Style nuance caption & optional Refined Flow endings selector */}
+      <div className="flex flex-col gap-2.5 border-b border-[#F3F4F6] bg-[#FAFAFB] px-5 py-2.5 text-xs text-[#6B7280] sm:flex-row sm:items-center sm:justify-between">
+        <p className="leading-relaxed">
+          <span className="font-medium text-[#374151]">{STYLE_LABELS[style]}:</span>{' '}
+          {STYLE_DESCRIPTIONS[style]}
+        </p>
+
+        {style === 'refined_flow' && (
+          <div className="flex shrink-0 items-center gap-2">
+            <span className="whitespace-nowrap text-[11px] font-medium text-[#4B5563]">
+              Voice Endings:
+            </span>
+            <div
+              role="radiogroup"
+              aria-label="Refined Flow voice endings"
+              className="inline-flex items-center rounded-md bg-[#ECEEF1] p-0.5"
+            >
+              {(['colloquial', 'literary'] as VoiceEnding[]).map((ending) => {
+                const active = refinedEnding === ending;
+                return (
+                  <button
+                    key={ending}
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    disabled={isTranscribing}
+                    title={ENDING_LABELS[ending]}
+                    onClick={() => onRefinedEndingChange(ending)}
+                    className={`whitespace-nowrap rounded px-2.5 py-1 text-[11px] font-medium transition-all duration-150 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#4338CA] disabled:opacity-60 ${
+                      active
+                        ? 'bg-white text-[#312E81] shadow-xs'
+                        : 'text-[#4B5563] hover:text-[#111827]'
+                    }`}
+                  >
+                    {ending === 'colloquial' ? 'Colloquial' : 'Literary'}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Main recorder / staging body */}
@@ -627,8 +677,8 @@ export function DictationDock({
               <p className="text-xs text-[#6B7280]">
                 {isTranscribing
                   ? stagedAudio.source === 'upload' && uploadMode === 'summarize_structure'
-                    ? `Summarizing and structuring audio into ${STYLE_LABELS[style]} with ${MODEL_LABELS[model]}…`
-                    : `Transcribing complete audio into ${STYLE_LABELS[style]} with ${MODEL_LABELS[model]}…`
+                    ? `Summarizing and structuring audio into ${formatStyleWithEnding(style, refinedEnding)} with ${MODEL_LABELS[model]}…`
+                    : `Processing audio into ${formatStyleWithEnding(style, refinedEnding)} with ${MODEL_LABELS[model]}…`
                   : 'Play back or download your backup above before processing.'}
               </p>
 
