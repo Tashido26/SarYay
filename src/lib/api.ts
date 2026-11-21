@@ -13,7 +13,13 @@ async function parseErrorResponse(res: Response): Promise<string> {
     if (data.error) return data.error;
     if (data.message) return data.message;
   } catch {
-    // Fallback to status text
+    // Fallback to status-specific guidance
+  }
+  if (res.status === 413) {
+    return 'This audio file is larger than the hosting platform upload limit (~6 MB on Netlify). Please split or compress the recording into smaller clips.';
+  }
+  if (res.status === 504 || res.status === 502) {
+    return 'Transcription timed out on the server. Try Gemini 2.5 Flash or split very long recordings into shorter clips.';
   }
   return `Request failed (${res.status} ${res.statusText || 'Error'})`;
 }

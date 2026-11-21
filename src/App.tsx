@@ -389,17 +389,6 @@ export default function App() {
               </button>
             )}
 
-            <button
-              type="button"
-              onClick={() => setSidebarOpen(true)}
-              aria-label="Open sidebar"
-              className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[#4B5563] transition-colors hover:bg-[#F3F4F6] hover:text-[#111827] lg:hidden ${
-                !sidebarOpen ? 'hidden' : ''
-              }`}
-            >
-              <PanelLeft className="h-4 w-4" />
-            </button>
-
             <div className="min-w-0">
               <div className="flex items-center gap-2 text-sm">
                 {!sidebarOpen && (
