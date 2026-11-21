@@ -1,5 +1,15 @@
-import { useEffect, useRef, useState } from 'react';
-import { Check, Loader2, LogOut, PanelLeftClose, Pencil, Plus, Trash2, X } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Check,
+  Loader2,
+  LogOut,
+  PanelLeftClose,
+  Pencil,
+  Plus,
+  Search,
+  Trash2,
+  X,
+} from 'lucide-react';
 import type { StorySession } from '../types.ts';
 import { STYLE_SHORT_LABELS } from '../types.ts';
 import { formatTimestamp } from '../lib/format.ts';
@@ -48,6 +58,7 @@ export function Sidebar({
 }: SidebarProps) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftTitle, setDraftTitle] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
   const editInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -73,9 +84,21 @@ export function Sidebar({
     setEditingId(null);
   };
 
-  const sortedSessions = [...sessions].sort(
-    (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+  const sortedSessions = useMemo(
+    () =>
+      [...sessions].sort(
+        (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+      ),
+    [sessions],
   );
+
+  const normalizedQuery = searchQuery.trim().toLowerCase();
+  const filteredSessions = useMemo(() => {
+    if (!normalizedQuery) return sortedSessions;
+    return sortedSessions.filter((session) =>
+      (session.title || 'Untitled Story').toLowerCase().includes(normalizedQuery),
+    );
+  }, [sortedSessions, normalizedQuery]);
 
   const sidebarContent = (
     <aside className="safe-top safe-bottom flex h-full w-[268px] flex-col border-r border-[#E5E7EB] bg-[#F8F9FA]">
@@ -127,16 +150,56 @@ export function Sidebar({
         </button>
       </div>
 
+      {/* Minimal story search */}
+      <div className="px-3 pb-2.5">
+        <div className="relative flex items-center">
+          <Search
+            className="pointer-events-none absolute left-2.5 h-3.5 w-3.5 text-[#9CA3AF]"
+            aria-hidden="true"
+          />
+          <input
+            type="search"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search stories…"
+            aria-label="Search stories by title"
+            className="w-full rounded-lg border border-[#E5E7EB] bg-white py-1.5 pl-8 pr-7 text-base text-[#111827] placeholder:text-[#9CA3AF] transition-colors focus:border-[#4338CA] focus:outline-none lg:text-xs"
+          />
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={() => setSearchQuery('')}
+              aria-label="Clear search"
+              className="absolute right-1.5 inline-flex h-5 w-5 items-center justify-center rounded text-[#9CA3AF] hover:bg-[#F3F4F6] hover:text-[#4B5563]"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          )}
+        </div>
+      </div>
+
       {/* Stories list */}
-      <div className="px-4 pb-2 pt-1">
-        <p className="text-xs font-medium text-[#6B7280]">
-          Stories ({sessions.length}
-          {hasMoreStories ? '+' : ''})
+      <div className="px-4 pb-2 pt-0.5">
+        <p className="text-xs font-medium text-[#6B7280] tabular-nums">
+          {normalizedQuery
+            ? `Matching (${filteredSessions.length} / ${sessions.length}${hasMoreStories ? '+' : ''})`
+            : `Stories (${sessions.length}${hasMoreStories ? '+' : ''})`}
         </p>
       </div>
 
       <nav className="flex-1 space-y-1 overflow-y-auto px-2.5 pb-4" aria-label="Saved stories">
-        {sortedSessions.map((session) => {
+        {filteredSessions.length === 0 && normalizedQuery ? (
+          <div className="px-3 py-6 text-center text-xs text-[#6B7280]">
+            <p>No matching stories</p>
+            {hasMoreStories && onLoadOlderStories && (
+              <p className="mt-1 text-[11px] text-[#9CA3AF]">
+                Older stories below can be loaded to search further.
+              </p>
+            )}
+          </div>
+        ) : null}
+
+        {filteredSessions.map((session) => {
           const isActive = activeView === 'story' && session.id === activeSessionId;
           const isEditing = editingId === session.id;
           const sectionCount =

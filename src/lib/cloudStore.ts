@@ -50,6 +50,7 @@ import { createId } from './storage.ts';
 
 // Schema limits synchronized with firebase-blueprint.json & firestore.rules
 const MAX_TITLE_LENGTH = 300;
+const MAX_GLOSSARY_LENGTH = 8000;
 const MAX_CONTENT_LENGTH = 200000;
 const MAX_VERSIONS = 50;
 const MAX_FILENAME_LENGTH = 260;
@@ -57,6 +58,28 @@ const MAX_MIMETYPE_LENGTH = 100;
 const MAX_URL_LENGTH = 2048;
 const MAX_STORAGE_PATH_LENGTH = 512;
 const MAX_ID_LENGTH = 128;
+// Safe ceiling below Firestore's hard 1 MiB (1,048,576 byte) document limit (accounts for protobuf field overhead)
+const MAX_SAFE_SECTION_DOC_BYTES = 850_000;
+
+function estimateUtf8Bytes(value: unknown): number {
+  const json = JSON.stringify(value);
+  if (typeof TextEncoder !== 'undefined') {
+    return new TextEncoder().encode(json).length;
+  }
+  return json.length * 3;
+}
+
+function assertSectionPayloadWithinLimit(
+  content: string,
+  versions: SanitizedVersionDoc[],
+): void {
+  const estimatedBytes = estimateUtf8Bytes({ content, versions }) + 4096;
+  if (estimatedBytes > MAX_SAFE_SECTION_DOC_BYTES) {
+    throw new Error(
+      'This section and its version history are approaching Firestore’s 1 MB document limit. Please copy the text into a new section before adding another version.',
+    );
+  }
+}
 
 function clampString(value: string, maxLen: number): string {
   return value.length > maxLen ? value.slice(0, maxLen) : value;
@@ -214,6 +237,7 @@ function parseStoryDoc(id: string, data: Record<string, unknown>): StorySession 
     defaultRefinedEnding: normalizeEnding(data.defaultRefinedEnding),
     defaultModel: normalizeModel(data.defaultModel),
     sectionCount: typeof data.sectionCount === 'number' ? data.sectionCount : 0,
+    glossary: typeof data.glossary === 'string' ? data.glossary : '',
     isDeleted: data.isDeleted === true,
     deletedAt: optionalTimestampToIso(data.deletedAt),
     sections: [],
@@ -501,6 +525,7 @@ export function subscribeToSections(
     collection(db, path),
     where('ownerId', '==', uid),
     where('storyId', '==', storyId),
+    where('isDeleted', '==', false),
   );
 
   return onSnapshot(
@@ -508,7 +533,6 @@ export function subscribeToSections(
     (snapshot) => {
       const sections = snapshot.docs
         .map((docSnap) => parseSectionDoc(docSnap.id, docSnap.data()))
-        .filter((sec) => !sec.isDeleted)
         .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
       onData(sections);
     },
@@ -558,11 +582,11 @@ export async function fetchStorySectionsOnce(
       collection(db, path),
       where('ownerId', '==', uid),
       where('storyId', '==', storyId),
+      where('isDeleted', '==', false),
     );
     const snap = await getDocs(q);
     return snap.docs
       .map((docSnap) => parseSectionDoc(docSnap.id, docSnap.data()))
-      .filter((sec) => !sec.isDeleted)
       .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, path);
@@ -670,6 +694,23 @@ export async function updateStoryModelInCloud(
   }
 }
 
+export async function updateStoryGlossaryInCloud(
+  uid: string,
+  storyId: string,
+  glossary: string,
+): Promise<void> {
+  const path = `users/${uid}/stories/${storyId}`;
+  const cleanGlossary = clampString(glossary.trim(), MAX_GLOSSARY_LENGTH);
+  try {
+    await updateDoc(doc(db, path), {
+      glossary: cleanGlossary,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Section CRUD Operations
 // ---------------------------------------------------------------------------
@@ -744,6 +785,8 @@ export async function updateSectionContentInCloud(
   const cleanVersions = sanitizeVersionsForCloud(versions);
   const cleanContent = clampString(content, MAX_CONTENT_LENGTH);
 
+  assertSectionPayloadWithinLimit(cleanContent, cleanVersions);
+
   try {
     const batch = writeBatch(db);
     batch.update(doc(db, sectionPath), {
@@ -801,6 +844,8 @@ export async function appendSectionVersionInCloud(
   const cleanVersions = sanitizeVersionsForCloud(nextVersions);
   const activeVersionIndex = cleanVersions.length - 1;
   const active = cleanVersions[activeVersionIndex];
+
+  assertSectionPayloadWithinLimit(active.text, cleanVersions);
 
   try {
     const batch = writeBatch(db);
@@ -1050,28 +1095,29 @@ export async function restoreSectionFromTrashInCloud(
 export async function permanentlyDeleteSectionFromTrashInCloud(
   uid: string,
   trashed: TrashedSection,
-  parentStoryStillExists: boolean,
 ): Promise<void> {
   const trashPath = `users/${uid}/trashedSections/${trashed.id}`;
 
-  // Delete from original story subcollection if parent still exists
-  if (parentStoryStillExists && trashed.parentStoryId) {
+  // 1. Delete Firebase Storage audio file FIRST so transient Storage failures never orphan audio
+  if (trashed.storagePath) {
+    await deleteSectionAudioFileStrict(trashed.storagePath);
+  }
+
+  // 2. Always attempt to clean up the original subcollection doc regardless of sidebar pagination
+  if (trashed.parentStoryId && trashed.parentStoryId !== 'unknown') {
     const origPath = `users/${uid}/stories/${trashed.parentStoryId}/sections/${trashed.id}`;
     try {
       await deleteDoc(doc(db, origPath));
     } catch {
-      // Ignore if already removed or parent deleted
+      // Safe to ignore if parent story was already permanently deleted or doc already removed
     }
   }
 
+  // 3. Remove Trash index document last
   try {
     await deleteDoc(doc(db, trashPath));
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, trashPath);
-  }
-
-  if (trashed.storagePath) {
-    await deleteSectionAudioFile(trashed.storagePath);
   }
 }
 
@@ -1092,20 +1138,27 @@ export async function permanentlyDeleteStoryInCloud(uid: string, storyId: string
   }
 
   const storagePathsToDelete: string[] = [];
+  for (const secSnap of sectionDocs.docs) {
+    const data = secSnap.data();
+    const isIndividuallyTrashed = data.isDeleted === true;
+    // Preserve Storage audio for sections that are independently tracked in trashedSections
+    if (!isIndividuallyTrashed && typeof data.storagePath === 'string' && data.storagePath.trim()) {
+      storagePathsToDelete.push(data.storagePath.trim());
+    }
+  }
 
-  // Delete child section documents BEFORE deleting parent story so Master Gate passes
+  // 1. Delete Firebase Storage audio files FIRST so no audio files are orphaned on Storage errors
+  for (const sp of storagePathsToDelete) {
+    await deleteSectionAudioFileStrict(sp);
+  }
+
+  // 2. Delete child section documents BEFORE deleting parent story so Master Gate passes
   try {
     const docs = sectionDocs.docs;
     for (let i = 0; i < docs.length; i += 400) {
       const chunk = docs.slice(i, i + 400);
       const batch = writeBatch(db);
       for (const secSnap of chunk) {
-        const data = secSnap.data();
-        const isIndividuallyTrashed = data.isDeleted === true;
-        // Preserve Storage audio for sections that are independently tracked in trashedSections
-        if (!isIndividuallyTrashed && typeof data.storagePath === 'string' && data.storagePath.trim()) {
-          storagePathsToDelete.push(data.storagePath.trim());
-        }
         batch.delete(secSnap.ref);
       }
       await batch.commit();
@@ -1114,20 +1167,18 @@ export async function permanentlyDeleteStoryInCloud(uid: string, storyId: string
     handleFirestoreError(error, OperationType.DELETE, sectionsPath);
   }
 
+  // 3. Delete parent story document last
   try {
     await deleteDoc(doc(db, storyPath));
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, storyPath);
   }
-
-  await Promise.allSettled(storagePathsToDelete.map((sp) => deleteSectionAudioFile(sp)));
 }
 
 export async function purgeExpiredTrashInCloud(
   uid: string,
   trashedStories: StorySession[],
   trashedSections: TrashedSection[],
-  allStoryIds: Set<string>,
 ): Promise<number> {
   let purgedCount = 0;
 
@@ -1144,11 +1195,7 @@ export async function purgeExpiredTrashInCloud(
   const expiredSections = trashedSections.filter((sec) => isTrashItemExpired(sec.deletedAt));
   for (const sec of expiredSections) {
     try {
-      await permanentlyDeleteSectionFromTrashInCloud(
-        uid,
-        sec,
-        allStoryIds.has(sec.parentStoryId),
-      );
+      await permanentlyDeleteSectionFromTrashInCloud(uid, sec);
       purgedCount += 1;
     } catch (err) {
       console.warn('Auto-cleanup failed for expired section:', sec.id, err);
@@ -1206,6 +1253,19 @@ export async function downloadSectionAudioBlob(
     }
   }
   return null;
+}
+
+export async function deleteSectionAudioFileStrict(storagePath: string): Promise<void> {
+  if (!storagePath) return;
+  try {
+    await deleteObject(ref(storage, storagePath));
+  } catch (err) {
+    const code = (err as { code?: string })?.code || '';
+    if (code === 'storage/object-not-found') {
+      return;
+    }
+    throw err;
+  }
 }
 
 export async function deleteSectionAudioFile(storagePath: string): Promise<void> {

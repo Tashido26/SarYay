@@ -39,6 +39,8 @@ export default async (req: Request): Promise<Response> => {
     const refinedEnding = String(formData.get('refinedEnding') || 'colloquial') as VoiceEnding;
     const model = String(formData.get('model') || 'gemini-2.5-flash') as GeminiModel;
     const mode = String(formData.get('mode') || 'full_polish') as ProcessingMode;
+    const glossaryEntry = formData.get('glossary');
+    const glossary = typeof glossaryEntry === 'string' ? glossaryEntry : undefined;
 
     const result = await transcribeAudioBuffer({
       buffer,
@@ -51,6 +53,7 @@ export default async (req: Request): Promise<Response> => {
       refinedEnding,
       model,
       mode,
+      glossary,
     });
 
     return Response.json(result, { status: 200 });

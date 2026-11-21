@@ -43,6 +43,7 @@ export async function transcribeAudioApi(params: {
   refinedEnding?: VoiceEnding;
   model: GeminiModel;
   mode?: ProcessingMode;
+  glossary?: string;
   signal?: AbortSignal;
 }): Promise<TranscribeResponse> {
   const idToken = await getAuthIdToken();
@@ -55,6 +56,9 @@ export async function transcribeAudioApi(params: {
   formData.append('refinedEnding', params.refinedEnding ?? 'colloquial');
   formData.append('model', params.model);
   formData.append('mode', params.mode ?? 'full_polish');
+  if (params.glossary && params.glossary.trim()) {
+    formData.append('glossary', params.glossary.trim());
+  }
 
   const response = await fetch('/api/transcribe', {
     method: 'POST',
@@ -84,6 +88,7 @@ export async function restyleTextApi(params: {
   refinedEnding?: VoiceEnding;
   model: GeminiModel;
   mode?: ProcessingMode;
+  glossary?: string;
   signal?: AbortSignal;
 }): Promise<TranscribeResponse> {
   const idToken = await getAuthIdToken();
@@ -99,6 +104,7 @@ export async function restyleTextApi(params: {
       refinedEnding: params.refinedEnding ?? 'colloquial',
       model: params.model,
       mode: params.mode ?? 'full_polish',
+      glossary: params.glossary?.trim() || undefined,
     }),
     signal: params.signal,
   });

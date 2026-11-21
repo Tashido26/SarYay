@@ -69,6 +69,7 @@ async function startServer(): Promise<void> {
         const refinedEnding = String(req.body?.refinedEnding || 'colloquial') as VoiceEnding;
         const model = String(req.body?.model || 'gemini-2.5-flash') as GeminiModel;
         const mode = String(req.body?.mode || 'full_polish') as ProcessingMode;
+        const glossary = typeof req.body?.glossary === 'string' ? req.body.glossary : undefined;
 
         const result = await transcribeAudioBuffer({
           buffer: file.buffer,
@@ -78,6 +79,7 @@ async function startServer(): Promise<void> {
           refinedEnding,
           model,
           mode,
+          glossary,
         });
 
         res.json(result);
@@ -95,8 +97,16 @@ async function startServer(): Promise<void> {
       const refinedEnding = String(req.body?.refinedEnding || 'colloquial') as VoiceEnding;
       const model = String(req.body?.model || 'gemini-2.5-flash') as GeminiModel;
       const mode = String(req.body?.mode || 'full_polish') as ProcessingMode;
+      const glossary = typeof req.body?.glossary === 'string' ? req.body.glossary : undefined;
 
-      const result = await restyleTextContent({ text, style, refinedEnding, model, mode });
+      const result = await restyleTextContent({
+        text,
+        style,
+        refinedEnding,
+        model,
+        mode,
+        glossary,
+      });
       res.json(result);
     } catch (err) {
       const formatted = formatApiError(err);

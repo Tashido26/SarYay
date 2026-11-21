@@ -37,6 +37,11 @@
           "type": "integer",
           "description": "Current number of active sections belonging to this story (0..5000)."
         },
+        "glossary": {
+          "type": "string",
+          "maxLength": 8000,
+          "description": "Optional per-story writer glossary of character names, places, and preferred spellings injected into Gemini prompts."
+        },
         "isDeleted": {
           "type": "boolean",
           "description": "Whether the story has been soft-deleted into the 30-day Trash Bin."

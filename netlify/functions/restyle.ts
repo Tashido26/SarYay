@@ -28,6 +28,7 @@ export default async (req: Request): Promise<Response> => {
       refinedEnding?: unknown;
       model?: unknown;
       mode?: unknown;
+      glossary?: unknown;
     };
 
     const text = typeof body?.text === 'string' ? body.text : '';
@@ -35,8 +36,16 @@ export default async (req: Request): Promise<Response> => {
     const refinedEnding = String(body?.refinedEnding || 'colloquial') as VoiceEnding;
     const model = String(body?.model || 'gemini-2.5-flash') as GeminiModel;
     const mode = String(body?.mode || 'full_polish') as ProcessingMode;
+    const glossary = typeof body?.glossary === 'string' ? body.glossary : undefined;
 
-    const result = await restyleTextContent({ text, style, refinedEnding, model, mode });
+    const result = await restyleTextContent({
+      text,
+      style,
+      refinedEnding,
+      model,
+      mode,
+      glossary,
+    });
     return Response.json(result, { status: 200 });
   } catch (err) {
     const formatted = formatApiError(err);

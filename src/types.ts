@@ -6,6 +6,10 @@ export type GeminiModel = 'gemini-2.5-flash' | 'gemini-2.5-pro';
 
 export type ProcessingMode = 'full_polish' | 'summarize_structure';
 
+export type ReprocessSource = 'text' | 'audio';
+
+export type SectionSaveStatus = 'saved' | 'saving' | 'error';
+
 export interface AudioMeta {
   filename: string;
   mimeType: string;
@@ -70,6 +74,7 @@ export interface StorySession {
   defaultRefinedEnding?: VoiceEnding;
   defaultModel: GeminiModel;
   sectionCount?: number;
+  glossary?: string;
   isDeleted?: boolean;
   deletedAt?: string | null;
   sections: ManuscriptSection[];

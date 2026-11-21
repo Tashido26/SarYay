@@ -4,10 +4,13 @@ const DB_NAME = 'sarpay_studio_audio_db';
 const DB_VERSION = 1;
 const STORE_NAME = 'audio_clips';
 
+const DRAFT_KEY_PREFIX = 'pending_draft__';
+
 export interface StoredAudioRecord {
   id: string;
   blob: Blob;
   meta: AudioMeta;
+  source?: 'recording' | 'upload';
   savedAt: string;
 }
 
@@ -108,4 +111,48 @@ export async function deleteAudioClips(ids: string[]): Promise<void> {
   } catch (err) {
     console.warn('Could not delete audio clips from IndexedDB:', err);
   }
+}
+
+function pendingDraftKey(storyId: string): string {
+  return `${DRAFT_KEY_PREFIX}${storyId}`;
+}
+
+export async function savePendingDraftAudio(
+  storyId: string,
+  blob: Blob,
+  meta: AudioMeta,
+  source: 'recording' | 'upload' = 'recording',
+): Promise<boolean> {
+  if (!storyId) return false;
+  try {
+    const db = await openAudioDb();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      const record: StoredAudioRecord = {
+        id: pendingDraftKey(storyId),
+        blob,
+        meta,
+        source,
+        savedAt: new Date().toISOString(),
+      };
+      store.put(record);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error ?? new Error('Failed to back up audio draft locally.'));
+    });
+    return true;
+  } catch (err) {
+    console.warn('Could not back up pending audio draft to IndexedDB:', err);
+    return false;
+  }
+}
+
+export async function getPendingDraftAudio(storyId: string): Promise<StoredAudioRecord | null> {
+  if (!storyId) return null;
+  return getAudioClip(pendingDraftKey(storyId));
+}
+
+export async function deletePendingDraftAudio(storyId: string): Promise<void> {
+  if (!storyId) return;
+  await deleteAudioClip(pendingDraftKey(storyId));
 }

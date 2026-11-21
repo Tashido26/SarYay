@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
+  Download,
   Loader2,
   Mic,
   RotateCcw,
+  ShieldCheck,
   Square,
   Upload,
   Wand2,
@@ -29,10 +31,22 @@ import {
   buildRecordingFilename,
   formatDuration,
   getAudioDuration,
+  triggerBlobDownload,
 } from '../lib/format.ts';
+import {
+  deletePendingDraftAudio,
+  getPendingDraftAudio,
+  savePendingDraftAudio,
+} from '../lib/audioDb.ts';
 import { AudioPlayerBar } from './AudioPlayerBar.tsx';
 
+interface WakeLockSentinelLike {
+  released?: boolean;
+  release: () => Promise<void>;
+}
+
 interface DictationDockProps {
+  storyId: string;
   storyTitle: string;
   style: WritingStyle;
   refinedEnding: VoiceEnding;
@@ -101,6 +115,7 @@ function isSupportedAudioFile(file: File): boolean {
 }
 
 export function DictationDock({
+  storyId,
   storyTitle,
   style,
   refinedEnding,
@@ -113,6 +128,8 @@ export function DictationDock({
   const [isRecording, setIsRecording] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [stagedAudio, setStagedAudio] = useState<StagedAudio | null>(null);
+  const [isRecoveredDraft, setIsRecoveredDraft] = useState(false);
+  const [hasFailedAttempt, setHasFailedAttempt] = useState(false);
   const [uploadMode, setUploadMode] = useState<ProcessingMode>('full_polish');
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
@@ -123,6 +140,9 @@ export function DictationDock({
   const chunksRef = useRef<Blob[]>([]);
   const timerIntervalRef = useRef<number | null>(null);
   const startTimeRef = useRef<number>(0);
+  const wakeLockRef = useRef<WakeLockSentinelLike | null>(null);
+  const isRecordingRef = useRef<boolean>(false);
+  const storyIdRef = useRef<string>(storyId);
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -132,6 +152,38 @@ export function DictationDock({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const stagedUrlRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    storyIdRef.current = storyId;
+  }, [storyId]);
+
+  useEffect(() => {
+    isRecordingRef.current = isRecording;
+  }, [isRecording]);
+
+  const requestScreenWakeLock = useCallback(async () => {
+    if (typeof navigator === 'undefined') return;
+    const wakeLockApi = (
+      navigator as Navigator & {
+        wakeLock?: { request: (type: 'screen') => Promise<WakeLockSentinelLike> };
+      }
+    ).wakeLock;
+    if (!wakeLockApi?.request) return;
+    try {
+      if (wakeLockRef.current && !wakeLockRef.current.released) return;
+      wakeLockRef.current = await wakeLockApi.request('screen');
+    } catch {
+      // Wake Lock is best-effort (may be unavailable in low-power mode or unsupported browsers)
+    }
+  }, []);
+
+  const releaseScreenWakeLock = useCallback(() => {
+    const sentinel = wakeLockRef.current;
+    wakeLockRef.current = null;
+    if (sentinel) {
+      sentinel.release().catch(() => undefined);
+    }
+  }, []);
 
   const stopWaveformAndTracks = useCallback(() => {
     if (animationFrameRef.current !== null) {
@@ -153,16 +205,88 @@ export function DictationDock({
       }
       mediaStreamRef.current = null;
     }
-  }, []);
+    releaseScreenWakeLock();
+  }, [releaseScreenWakeLock]);
 
-  const clearStagedAudio = useCallback(() => {
+  const clearStagedAudio = useCallback((removeLocalDraft = false) => {
     if (stagedUrlRef.current) {
       URL.revokeObjectURL(stagedUrlRef.current);
       stagedUrlRef.current = null;
     }
     setStagedAudio(null);
+    setIsRecoveredDraft(false);
+    setHasFailedAttempt(false);
     setErrorMessage(null);
+    if (removeLocalDraft && storyIdRef.current) {
+      void deletePendingDraftAudio(storyIdRef.current);
+    }
   }, []);
+
+  // Re-acquire Screen Wake Lock if user switches back to Safari/PWA mid-recording
+  useEffect(() => {
+    if (!isRecording) return;
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible' && isRecordingRef.current) {
+        void requestScreenWakeLock();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [isRecording, requestScreenWakeLock]);
+
+  // Warn before accidental refresh/close while recording or while unsent audio is staged
+  useEffect(() => {
+    if (!isRecording && !stagedAudio && !isTranscribing) return;
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [isRecording, stagedAudio, isTranscribing]);
+
+  // Restore any unsent local IndexedDB audio draft for the opened story
+  useEffect(() => {
+    let cancelled = false;
+    if (isRecordingRef.current) return;
+
+    if (stagedUrlRef.current) {
+      URL.revokeObjectURL(stagedUrlRef.current);
+      stagedUrlRef.current = null;
+    }
+    setStagedAudio(null);
+    setIsRecoveredDraft(false);
+    setHasFailedAttempt(false);
+    setErrorMessage(null);
+
+    if (!storyId) return;
+
+    void getPendingDraftAudio(storyId).then((draft) => {
+      if (cancelled || !draft || !draft.blob || draft.blob.size === 0 || isRecordingRef.current) {
+        return;
+      }
+      const objectUrl = URL.createObjectURL(draft.blob);
+      stagedUrlRef.current = objectUrl;
+      setStagedAudio({
+        blob: draft.blob,
+        url: objectUrl,
+        filename: draft.meta.filename,
+        mimeType: draft.meta.mimeType || draft.blob.type || 'audio/webm',
+        durationSec: draft.meta.durationSec,
+        sizeBytes: draft.meta.sizeBytes || draft.blob.size,
+        source: draft.source ?? 'recording',
+      });
+      setIsRecoveredDraft(true);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [storyId]);
 
   useEffect(() => {
     return () => {
@@ -258,7 +382,7 @@ export function DictationDock({
       return;
     }
 
-    clearStagedAudio();
+    clearStagedAudio(true);
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -330,13 +454,29 @@ export function DictationDock({
         }
 
         const measuredDuration = await getAudioDuration(blob, recordedDuration);
+        const filename = buildRecordingFilename(storyTitle, resolvedMime);
         const objectUrl = URL.createObjectURL(blob);
         stagedUrlRef.current = objectUrl;
 
+        // Immediately back up the finished recording to IndexedDB before transcription starts
+        void savePendingDraftAudio(
+          storyIdRef.current,
+          blob,
+          {
+            filename,
+            mimeType: resolvedMime,
+            durationSec: measuredDuration,
+            sizeBytes: blob.size,
+          },
+          'recording',
+        );
+
+        setIsRecoveredDraft(false);
+        setHasFailedAttempt(false);
         setStagedAudio({
           blob,
           url: objectUrl,
-          filename: buildRecordingFilename(storyTitle, resolvedMime),
+          filename,
           mimeType: resolvedMime,
           durationSec: measuredDuration,
           sizeBytes: blob.size,
@@ -364,6 +504,7 @@ export function DictationDock({
         recorder.start(1000);
       }
       setIsRecording(true);
+      void requestScreenWakeLock();
 
       timerIntervalRef.current = window.setInterval(() => {
         setElapsedSeconds((Date.now() - startTimeRef.current) / 1000);
@@ -406,16 +547,31 @@ export function DictationDock({
       return;
     }
 
-    clearStagedAudio();
+    clearStagedAudio(true);
     const duration = await getAudioDuration(file, 0);
+    const resolvedMime = file.type || 'audio/mpeg';
     const objectUrl = URL.createObjectURL(file);
     stagedUrlRef.current = objectUrl;
 
+    void savePendingDraftAudio(
+      storyIdRef.current,
+      file,
+      {
+        filename: file.name,
+        mimeType: resolvedMime,
+        durationSec: duration,
+        sizeBytes: file.size,
+      },
+      'upload',
+    );
+
+    setIsRecoveredDraft(false);
+    setHasFailedAttempt(false);
     setStagedAudio({
       blob: file,
       url: objectUrl,
       filename: file.name,
-      mimeType: file.type || 'audio/mpeg',
+      mimeType: resolvedMime,
       durationSec: duration,
       sizeBytes: file.size,
       source: 'upload',
@@ -439,6 +595,11 @@ export function DictationDock({
     }
   };
 
+  const handleDownloadStagedRaw = () => {
+    if (!stagedAudio) return;
+    triggerBlobDownload(stagedAudio.blob, stagedAudio.filename);
+  };
+
   const handleTranscribeClick = async () => {
     if (!stagedAudio || isTranscribing) return;
     setErrorMessage(null);
@@ -448,14 +609,18 @@ export function DictationDock({
       stagedAudio.source === 'upload' ? uploadMode : 'full_polish';
     const controller = new AbortController();
     abortControllerRef.current = controller;
+    const targetStoryId = storyIdRef.current;
 
     try {
       await onTranscribe(stagedAudio, effectiveMode, controller.signal);
-      clearStagedAudio();
+      // Only delete local IndexedDB draft backup after Firestore confirms the section save
+      await deletePendingDraftAudio(targetStoryId);
+      clearStagedAudio(false);
     } catch (err) {
       if ((err as { name?: string })?.name === 'AbortError') {
-        setErrorMessage('Canceled. Your audio is still staged below.');
+        setErrorMessage('Canceled. Your audio is still backed up locally below.');
       } else {
+        setHasFailedAttempt(true);
         const msg = err instanceof Error ? err.message : 'Transcription failed. Please try again.';
         setErrorMessage(msg);
       }
@@ -642,8 +807,42 @@ export function DictationDock({
             </button>
           </div>
         ) : stagedAudio ? (
-          /* Staged Audio Preview, Upload Mode (if uploaded) & Transcribe */
+          /* Staged Audio Preview, Recovery Banner (if restored/interrupted), Upload Mode & Transcribe */
           <div className="space-y-3">
+            {(isRecoveredDraft || hasFailedAttempt) && !isTranscribing && (
+              <div
+                role="status"
+                className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#E5E7EB] bg-[#F8F9FA] px-3 py-2 text-xs text-[#374151]"
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-[#4338CA]" aria-hidden="true" />
+                  <span className="leading-snug">
+                    {hasFailedAttempt
+                      ? 'Audio safely backed up on this device. Retry when ready or download a copy.'
+                      : 'Recovered unsent recording backed up on this device.'}
+                  </span>
+                </div>
+                <div className="flex shrink-0 items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={handleTranscribeClick}
+                    className="inline-flex items-center gap-1 rounded-md border border-[#D1D5DB] bg-white px-2.5 py-1 text-[11px] font-medium text-[#312E81] transition-colors hover:bg-[#EEF2FF]"
+                  >
+                    <RotateCcw className="h-3 w-3" />
+                    <span>Retry</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDownloadStagedRaw}
+                    className="inline-flex items-center gap-1 rounded-md border border-[#E5E7EB] bg-white px-2.5 py-1 text-[11px] font-medium text-[#4B5563] transition-colors hover:bg-[#F3F4F6] hover:text-[#111827]"
+                  >
+                    <Download className="h-3 w-3" />
+                    <span>Download Raw Audio</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
             <AudioPlayerBar
               directBlob={stagedAudio.blob}
               directUrl={stagedAudio.url}
@@ -689,7 +888,7 @@ export function DictationDock({
                 <button
                   type="button"
                   disabled={isTranscribing}
-                  onClick={clearStagedAudio}
+                  onClick={() => clearStagedAudio(true)}
                   className="inline-flex items-center gap-1.5 whitespace-nowrap text-xs text-[#6B7280] transition-colors hover:text-[#111827] disabled:opacity-50"
                 >
                   <RotateCcw className="h-3.5 w-3.5" />
@@ -701,7 +900,7 @@ export function DictationDock({
                 {stagedAudio.source === 'upload' && !isTranscribing && (
                   <button
                     type="button"
-                    onClick={clearStagedAudio}
+                    onClick={() => clearStagedAudio(true)}
                     className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 py-2 text-xs font-medium text-[#6B7280] transition-colors hover:bg-[#F3F4F6] hover:text-[#111827]"
                   >
                     <RotateCcw className="h-3.5 w-3.5" />

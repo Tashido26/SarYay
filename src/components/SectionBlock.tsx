@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   Check,
   ChevronDown,
@@ -13,6 +13,8 @@ import {
 import type {
   GeminiModel,
   ManuscriptSection,
+  ReprocessSource,
+  SectionSaveStatus,
   VoiceEnding,
   WritingStyle,
 } from '../types.ts';
@@ -48,6 +50,7 @@ interface SectionBlockProps {
   index: number;
   activeModel: GeminiModel;
   isReprocessing: boolean;
+  saveStatus?: SectionSaveStatus;
   onUpdateContent: (sectionId: string, nextContent: string) => void;
   onFlushContent?: (sectionId: string) => void;
   onSelectVersion: (sectionId: string, versionIndex: number) => void;
@@ -55,16 +58,18 @@ interface SectionBlockProps {
     section: ManuscriptSection,
     targetStyle: WritingStyle,
     targetEnding?: VoiceEnding,
+    source?: ReprocessSource,
   ) => Promise<void>;
   onDeleteSection: (sectionId: string) => void;
   onCopyText: (text: string) => void;
 }
 
-export function SectionBlock({
+export const SectionBlock = memo(function SectionBlock({
   section,
   index,
   activeModel,
   isReprocessing,
+  saveStatus = 'saved',
   onUpdateContent,
   onFlushContent,
   onSelectVersion,
@@ -76,14 +81,14 @@ export function SectionBlock({
   const menuRef = useRef<HTMLDivElement | null>(null);
   const [showAudio, setShowAudio] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [showAudioReprocess, setShowAudioReprocess] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [saveLabel, setSaveLabel] = useState<'Saved' | 'Saving…'>('Saved');
-  const saveTimerRef = useRef<number | null>(null);
 
   const versions = getSectionVersions(section);
   const activeVersionIndex = getActiveVersionIndex(section);
   const activeVersion = versions[activeVersionIndex];
   const activeMode = activeVersion.mode ?? section.mode;
+  const hasOriginalAudio = Boolean(section.storagePath || section.audioUrl || section.audioId);
 
   const syncTextareaHeight = () => {
     const el = textareaRef.current;
@@ -97,18 +102,30 @@ export function SectionBlock({
   }, [activeVersion.text, activeVersionIndex]);
 
   useEffect(() => {
-    const onResize = () => syncTextareaHeight();
+    let resizeTimer: number | null = null;
+    const onResize = () => {
+      if (resizeTimer !== null) {
+        window.clearTimeout(resizeTimer);
+      }
+      resizeTimer = window.setTimeout(() => {
+        resizeTimer = null;
+        syncTextareaHeight();
+      }, 120);
+    };
     window.addEventListener('resize', onResize);
     return () => {
       window.removeEventListener('resize', onResize);
-      if (saveTimerRef.current !== null) {
-        window.clearTimeout(saveTimerRef.current);
+      if (resizeTimer !== null) {
+        window.clearTimeout(resizeTimer);
       }
     };
   }, []);
 
   useEffect(() => {
-    if (!menuOpen) return;
+    if (!menuOpen) {
+      setShowAudioReprocess(false);
+      return;
+    }
     const onMouseDown = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         setMenuOpen(false);
@@ -126,15 +143,7 @@ export function SectionBlock({
   }, [menuOpen]);
 
   const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const value = e.target.value;
-    setSaveLabel('Saving…');
-    onUpdateContent(section.id, value);
-    if (saveTimerRef.current !== null) {
-      window.clearTimeout(saveTimerRef.current);
-    }
-    saveTimerRef.current = window.setTimeout(() => {
-      setSaveLabel('Saved');
-    }, 350);
+    onUpdateContent(section.id, e.target.value);
   };
 
   const handleCopy = () => {
@@ -223,8 +232,16 @@ export function SectionBlock({
           <span aria-hidden="true">·</span>
           <span>{formatTimestamp(activeVersion.timestamp)}</span>
           <span aria-hidden="true">·</span>
-          <span className={saveLabel === 'Saving…' ? 'text-[#4338CA]' : 'text-[#6B7280]'}>
-            {saveLabel}
+          <span
+            className={
+              saveStatus === 'saving'
+                ? 'text-[#4338CA]'
+                : saveStatus === 'error'
+                  ? 'text-[#DC2626]'
+                  : 'text-[#6B7280]'
+            }
+          >
+            {saveStatus === 'saving' ? 'Saving…' : saveStatus === 'error' ? 'Save failed' : 'Saved'}
           </span>
         </div>
 
@@ -293,18 +310,21 @@ export function SectionBlock({
             {menuOpen && !isReprocessing && (
               <div
                 role="menu"
-                className="absolute left-1/2 z-20 mt-1.5 w-52 -translate-x-1/2 rounded-lg border border-[#E5E7EB] bg-white py-1 shadow-sm sm:left-auto sm:right-0 sm:translate-x-0"
+                className="absolute left-1/2 z-20 mt-1.5 w-56 -translate-x-1/2 rounded-lg border border-[#E5E7EB] bg-white py-1 shadow-sm sm:left-auto sm:right-0 sm:translate-x-0"
               >
+                <div className="px-3 py-1 text-[10px] font-medium uppercase tracking-wider text-[#9CA3AF]">
+                  Restyle text (fast)
+                </div>
                 {REPROCESS_OPTIONS.map((opt) => {
                   const active = isCurrentOption(opt);
                   return (
                     <button
-                      key={`${opt.style}-${opt.refinedEnding ?? 'default'}`}
+                      key={`text-${opt.style}-${opt.refinedEnding ?? 'default'}`}
                       type="button"
                       role="menuitem"
                       onClick={() => {
                         setMenuOpen(false);
-                        onReprocessStyle(section, opt.style, opt.refinedEnding);
+                        void onReprocessStyle(section, opt.style, opt.refinedEnding, 'text');
                       }}
                       className={`flex w-full items-center justify-between px-3 py-2 text-left text-xs transition-colors ${
                         active
@@ -317,6 +337,50 @@ export function SectionBlock({
                     </button>
                   );
                 })}
+
+                {hasOriginalAudio && (
+                  <div className="mt-1 border-t border-[#F3F4F6] pt-1">
+                    <button
+                      type="button"
+                      onClick={() => setShowAudioReprocess((prev) => !prev)}
+                      className="flex w-full items-center justify-between px-3 py-2 text-left text-xs font-medium text-[#4B5563] transition-colors hover:bg-[#F8F9FA] hover:text-[#111827]"
+                    >
+                      <span className="inline-flex items-center gap-1.5">
+                        <Headphones className="h-3.5 w-3.5 text-[#6B7280]" aria-hidden="true" />
+                        <span>Re-listen to Audio</span>
+                      </span>
+                      <ChevronDown
+                        className={`h-3 w-3 text-[#9CA3AF] transition-transform duration-150 ${
+                          showAudioReprocess ? 'rotate-180' : ''
+                        }`}
+                      />
+                    </button>
+
+                    {showAudioReprocess && (
+                      <div className="border-t border-[#F3F4F6] bg-[#FAFAFB] py-1">
+                        {REPROCESS_OPTIONS.map((opt) => (
+                          <button
+                            key={`audio-${opt.style}-${opt.refinedEnding ?? 'default'}`}
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              setMenuOpen(false);
+                              void onReprocessStyle(
+                                section,
+                                opt.style,
+                                opt.refinedEnding,
+                                'audio',
+                              );
+                            }}
+                            className="flex w-full items-center justify-between px-3.5 py-1.5 text-left text-[11px] text-[#4B5563] transition-colors hover:bg-[#EEF2FF]/60 hover:text-[#312E81]"
+                          >
+                            <span className="whitespace-nowrap">{opt.label}</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -377,4 +441,4 @@ export function SectionBlock({
       ) : null}
     </article>
   );
-}
+});

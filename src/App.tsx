@@ -2,7 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { User } from 'firebase/auth';
 import {
   AlertCircle,
+  BookOpen,
   Check,
+  ChevronDown,
   Cloud,
   CloudUpload,
   Copy,
@@ -17,6 +19,8 @@ import type {
   GeminiModel,
   ManuscriptSection,
   ProcessingMode,
+  ReprocessSource,
+  SectionSaveStatus,
   SectionVersion,
   StagedAudio,
   StorySession,
@@ -37,6 +41,7 @@ import {
   appendSectionVersionInCloud,
   createSectionInCloud,
   createStoryInCloud,
+  deleteSectionAudioFile,
   downloadSectionAudioBlob,
   fetchOlderStoriesPage,
   formatCloudErrorMessage,
@@ -55,6 +60,7 @@ import {
   subscribeToTrashedStories,
   syncFirestoreConnection,
   updateSectionContentInCloud,
+  updateStoryGlossaryInCloud,
   updateStoryModelInCloud,
   updateStoryRefinedEndingInCloud,
   updateStoryStyleInCloud,
@@ -138,12 +144,21 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     return loadSidebarOpen();
   });
 
-  // Instant local editing buffers (debounced to Firestore)
+  // Instant local editing buffers (debounced to Firestore & flushed on switch)
   const [titleDraft, setTitleDraft] = useState<string>('');
+  const titleDraftRef = useRef<string>('');
   const titleDirtyRef = useRef<boolean>(false);
   const titleDebounceRef = useRef<number | null>(null);
 
+  const [glossaryOpen, setGlossaryOpen] = useState<boolean>(false);
+  const [glossaryDraft, setGlossaryDraft] = useState<string>('');
+  const [glossarySaveStatus, setGlossarySaveStatus] = useState<SectionSaveStatus>('saved');
+  const glossaryDraftRef = useRef<string>('');
+  const glossaryDirtyRef = useRef<boolean>(false);
+  const glossaryDebounceRef = useRef<number | null>(null);
+
   const [sectionDrafts, setSectionDrafts] = useState<Record<string, string>>({});
+  const [sectionSaveStatus, setSectionSaveStatus] = useState<Record<string, SectionSaveStatus>>({});
   const sectionDraftsRef = useRef<Record<string, string>>({});
   const sectionDebounceRefs = useRef<Record<string, number>>({});
   const sectionsRef = useRef<ManuscriptSection[]>([]);
@@ -153,6 +168,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   const [syncPulseState, setSyncPulseState] = useState<'idle' | 'synced' | 'offline'>('idle');
   const [isUploadingAudio, setIsUploadingAudio] = useState(false);
   const [reprocessingSectionId, setReprocessingSectionId] = useState<string | null>(null);
+  const reprocessingSectionIdRef = useRef<string | null>(null);
   const [trashBusyItemId, setTrashBusyItemId] = useState<string | null>(null);
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirmAction | null>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
@@ -228,6 +244,10 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   }, [sectionDrafts]);
 
   useEffect(() => {
+    reprocessingSectionIdRef.current = reprocessingSectionId;
+  }, [reprocessingSectionId]);
+
+  useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
     if (activeSessionId) {
       saveActiveSessionId(activeSessionId);
@@ -250,6 +270,9 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       }
       if (titleDebounceRef.current !== null) {
         window.clearTimeout(titleDebounceRef.current);
+      }
+      if (glossaryDebounceRef.current !== null) {
+        window.clearTimeout(glossaryDebounceRef.current);
       }
       for (const timerId of Object.values(sectionDebounceRefs.current)) {
         window.clearTimeout(timerId);
@@ -489,14 +512,13 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   // Automatic 30-day permanent cleanup helper
   const runExpiredTrashCleanup = useCallback(async () => {
     if (trashedStories.length === 0 && trashedSections.length === 0) return;
-    const allIds = new Set(allKnownStories.map((s) => s.id));
-    const purged = await purgeExpiredTrashInCloud(uid, trashedStories, trashedSections, allIds);
+    const purged = await purgeExpiredTrashInCloud(uid, trashedStories, trashedSections);
     if (purged > 0) {
       showToast(
         `Auto-cleaned ${purged} expired Trash ${purged === 1 ? 'item' : 'items'} (> 30 days)`,
       );
     }
-  }, [uid, allKnownStories, trashedStories, trashedSections, showToast]);
+  }, [uid, trashedStories, trashedSections, showToast]);
 
   // Run automatic 30-day cleanup on initial app load once Trash data arrives
   useEffect(() => {
@@ -518,6 +540,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     if (!activeSessionId || activeView !== 'story') {
       setSections([]);
       setSectionsLoaded(true);
+      setSectionSaveStatus({});
       return;
     }
 
@@ -526,7 +549,9 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       window.clearTimeout(timerId);
     }
     sectionDebounceRefs.current = {};
+    sectionDraftsRef.current = {};
     setSectionDrafts({});
+    setSectionSaveStatus({});
 
     const unsubscribe = subscribeToSections(
       uid,
@@ -580,15 +605,46 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     }
   };
 
-  // Sync local title input with remote Firestore title when not actively editing
+  // Sync local title & glossary buffers with remote Firestore values when not actively editing
   useEffect(() => {
     if (!activeSession) return;
     if (!titleDirtyRef.current) {
       setTitleDraft(activeSession.title);
+      titleDraftRef.current = activeSession.title;
     }
   }, [activeSession?.id, activeSession?.title]);
 
-  // Merge any in-flight local typing drafts into displayed sections
+  useEffect(() => {
+    if (!activeSession) {
+      setGlossaryDraft('');
+      glossaryDraftRef.current = '';
+      setGlossarySaveStatus('saved');
+      return;
+    }
+    if (!glossaryDirtyRef.current) {
+      const nextGlossary = activeSession.glossary ?? '';
+      setGlossaryDraft(nextGlossary);
+      glossaryDraftRef.current = nextGlossary;
+      setGlossarySaveStatus('saved');
+    }
+  }, [activeSession?.id, activeSession?.glossary]);
+
+  // Collapse glossary drawer cleanly when changing stories
+  useEffect(() => {
+    setGlossaryOpen(false);
+  }, [activeSession?.id]);
+
+  // Count non-empty glossary lines/items for the subtle toggle badge
+  const glossaryEntryCount = useMemo(() => {
+    const raw = glossaryDraft.trim();
+    if (!raw) return 0;
+    return raw
+      .split(/[\n,]+/)
+      .map((item) => item.trim())
+      .filter(Boolean).length;
+  }, [glossaryDraft]);
+
+  // Merge any in-flight local typing drafts into displayed sections (unchanged sections keep ref identity for React.memo)
   const orderedSections = useMemo(() => {
     const sorted = sortSectionsChronologically(sections);
     return sorted.map((sec) => {
@@ -625,15 +681,16 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   }, [orderedSections]);
 
   const flushSectionDraft = useCallback(
-    async (sectionId: string) => {
+    async (sectionId: string, explicitStoryId?: string) => {
       const pendingTimer = sectionDebounceRefs.current[sectionId];
       if (pendingTimer !== undefined) {
         window.clearTimeout(pendingTimer);
         delete sectionDebounceRefs.current[sectionId];
       }
 
+      const targetStoryId = explicitStoryId ?? activeSessionIdRef.current;
       const draftText = sectionDraftsRef.current[sectionId];
-      if (draftText === undefined || !activeSessionId) return;
+      if (draftText === undefined || !targetStoryId) return;
 
       const targetSection = sectionsRef.current.find((s) => s.id === sectionId);
       if (!targetSection) return;
@@ -645,25 +702,154 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
         idx === activeIdx ? { ...v, text: draftText, timestamp: now } : v,
       );
 
+      // Remove this snapshot from the pending map before awaiting Firestore
+      if (sectionDraftsRef.current[sectionId] === draftText) {
+        const nextRefCopy = { ...sectionDraftsRef.current };
+        delete nextRefCopy[sectionId];
+        sectionDraftsRef.current = nextRefCopy;
+      }
       setSectionDrafts((prev) => {
         if (prev[sectionId] !== draftText) return prev;
         const copy = { ...prev };
         delete copy[sectionId];
         return copy;
       });
+      setSectionSaveStatus((prev) => ({ ...prev, [sectionId]: 'saving' }));
 
       try {
         await trackSync(() =>
-          updateSectionContentInCloud(uid, activeSessionId, sectionId, draftText, updatedVersions),
+          updateSectionContentInCloud(uid, targetStoryId, sectionId, draftText, updatedVersions),
         );
+        // Only switch to "Saved" after the Firestore promise resolves and no newer keystroke is queued
+        if (
+          activeSessionIdRef.current === targetStoryId &&
+          sectionDraftsRef.current[sectionId] === undefined
+        ) {
+          setSectionSaveStatus((prev) => ({ ...prev, [sectionId]: 'saved' }));
+        }
+      } catch (err) {
+        if (activeSessionIdRef.current === targetStoryId) {
+          setSectionSaveStatus((prev) => ({ ...prev, [sectionId]: 'error' }));
+        }
+        setGlobalError(formatCloudErrorMessage(err));
+      }
+    },
+    [uid, trackSync],
+  );
+
+  const handleRenameSession = useCallback(
+    async (id: string, title: string) => {
+      setGlobalError(null);
+      const clean = title.trim() || 'Untitled Story';
+      try {
+        await trackSync(() => renameStoryInCloud(uid, id, clean));
       } catch (err) {
         setGlobalError(formatCloudErrorMessage(err));
       }
     },
-    [uid, activeSessionId, trackSync],
+    [uid, trackSync],
   );
 
+  const flushTitleDraft = useCallback(
+    async (explicitStoryId?: string) => {
+      const targetStoryId = explicitStoryId ?? activeSessionIdRef.current;
+      if (titleDebounceRef.current !== null) {
+        window.clearTimeout(titleDebounceRef.current);
+        titleDebounceRef.current = null;
+      }
+      if (!targetStoryId || !titleDirtyRef.current) return;
+      titleDirtyRef.current = false;
+      const clean = titleDraftRef.current.trim() || 'Untitled Story';
+      if (activeSessionIdRef.current === targetStoryId) {
+        setTitleDraft(clean);
+      }
+      titleDraftRef.current = clean;
+      await handleRenameSession(targetStoryId, clean);
+    },
+    [handleRenameSession],
+  );
+
+  const flushGlossaryDraft = useCallback(
+    async (explicitStoryId?: string) => {
+      const targetStoryId = explicitStoryId ?? activeSessionIdRef.current;
+      if (glossaryDebounceRef.current !== null) {
+        window.clearTimeout(glossaryDebounceRef.current);
+        glossaryDebounceRef.current = null;
+      }
+      if (!targetStoryId || !glossaryDirtyRef.current) return;
+      glossaryDirtyRef.current = false;
+      const valueToSave = glossaryDraftRef.current;
+      if (activeSessionIdRef.current === targetStoryId) {
+        setGlossarySaveStatus('saving');
+      }
+      try {
+        await trackSync(() => updateStoryGlossaryInCloud(uid, targetStoryId, valueToSave));
+        if (activeSessionIdRef.current === targetStoryId && !glossaryDirtyRef.current) {
+          setGlossarySaveStatus('saved');
+        }
+      } catch (err) {
+        if (activeSessionIdRef.current === targetStoryId) {
+          setGlossarySaveStatus('error');
+        }
+        setGlobalError(formatCloudErrorMessage(err));
+      }
+    },
+    [uid, trackSync],
+  );
+
+  const flushAllPendingEdits = useCallback(
+    async (explicitStoryId?: string) => {
+      const targetStoryId = explicitStoryId ?? activeSessionIdRef.current;
+      if (!targetStoryId) return;
+
+      const tasks: Promise<unknown>[] = [];
+      if (titleDirtyRef.current || titleDebounceRef.current !== null) {
+        tasks.push(flushTitleDraft(targetStoryId));
+      }
+      if (glossaryDirtyRef.current || glossaryDebounceRef.current !== null) {
+        tasks.push(flushGlossaryDraft(targetStoryId));
+      }
+      const pendingDraftIds = Object.keys(sectionDraftsRef.current);
+      for (const secId of pendingDraftIds) {
+        tasks.push(flushSectionDraft(secId, targetStoryId));
+      }
+      if (tasks.length > 0) {
+        await Promise.allSettled(tasks);
+      }
+    },
+    [flushTitleDraft, flushGlossaryDraft, flushSectionDraft],
+  );
+
+  const handleSelectStory = useCallback(
+    (nextStoryId: string) => {
+      const prevStoryId = activeSessionIdRef.current;
+      if (prevStoryId && prevStoryId !== nextStoryId) {
+        void flushAllPendingEdits(prevStoryId);
+      }
+      titleDirtyRef.current = false;
+      glossaryDirtyRef.current = false;
+      setActiveSessionId(nextStoryId);
+      setLastOpenedStoryId(nextStoryId);
+      setActiveView('story');
+      setGlobalError(null);
+    },
+    [flushAllPendingEdits],
+  );
+
+  const handleSelectTrashView = useCallback(() => {
+    const prevStoryId = activeSessionIdRef.current;
+    if (prevStoryId) {
+      void flushAllPendingEdits(prevStoryId);
+    }
+    setActiveView('trash');
+    setGlobalError(null);
+  }, [flushAllPendingEdits]);
+
   const handleCreateSession = async () => {
+    const prevStoryId = activeSessionIdRef.current;
+    if (prevStoryId) {
+      void flushAllPendingEdits(prevStoryId);
+    }
     setGlobalError(null);
     const freshId = createId('story');
     try {
@@ -677,6 +863,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
         }),
       );
       titleDirtyRef.current = false;
+      glossaryDirtyRef.current = false;
       setActiveSessionId(freshId);
       setLastOpenedStoryId(freshId);
       setActiveView('story');
@@ -685,19 +872,10 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     }
   };
 
-  const handleRenameSession = async (id: string, title: string) => {
-    setGlobalError(null);
-    const clean = title.trim() || 'Untitled Story';
-    try {
-      await trackSync(() => renameStoryInCloud(uid, id, clean));
-    } catch (err) {
-      setGlobalError(formatCloudErrorMessage(err));
-    }
-  };
-
   const handleTitleInputChange = (nextTitle: string) => {
     if (!activeSession) return;
     titleDirtyRef.current = true;
+    titleDraftRef.current = nextTitle;
     setTitleDraft(nextTitle);
 
     if (titleDebounceRef.current !== null) {
@@ -705,38 +883,56 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     }
     const targetStoryId = activeSession.id;
     titleDebounceRef.current = window.setTimeout(() => {
-      titleDebounceRef.current = null;
-      titleDirtyRef.current = false;
-      void handleRenameSession(targetStoryId, nextTitle);
+      void flushTitleDraft(targetStoryId);
     }, 550);
   };
 
   const handleTitleInputBlur = () => {
     if (!activeSession) return;
-    if (titleDebounceRef.current !== null) {
-      window.clearTimeout(titleDebounceRef.current);
-      titleDebounceRef.current = null;
+    if (titleDirtyRef.current || titleDraftRef.current.trim() !== activeSession.title) {
+      titleDirtyRef.current = true;
+      void flushTitleDraft(activeSession.id);
     }
-    const clean = titleDraft.trim() || 'Untitled Story';
-    setTitleDraft(clean);
-    if (titleDirtyRef.current || clean !== activeSession.title) {
-      titleDirtyRef.current = false;
-      void handleRenameSession(activeSession.id, clean);
+  };
+
+  const handleGlossaryInputChange = (nextGlossary: string) => {
+    if (!activeSession) return;
+    glossaryDirtyRef.current = true;
+    glossaryDraftRef.current = nextGlossary;
+    setGlossaryDraft(nextGlossary);
+    setGlossarySaveStatus('saving');
+
+    if (glossaryDebounceRef.current !== null) {
+      window.clearTimeout(glossaryDebounceRef.current);
+    }
+    const targetStoryId = activeSession.id;
+    glossaryDebounceRef.current = window.setTimeout(() => {
+      void flushGlossaryDraft(targetStoryId);
+    }, 650);
+  };
+
+  const handleGlossaryInputBlur = () => {
+    if (!activeSession) return;
+    if (glossaryDirtyRef.current) {
+      void flushGlossaryDraft(activeSession.id);
     }
   };
 
   // Mandatory confirmation triggers (never delete immediately!)
-  const handleRequestTrashStory = (storyId: string) => {
-    const story = activeStories.find((s) => s.id === storyId);
-    if (!story) return;
-    setPendingConfirm({ kind: 'trash_story', story });
-  };
+  const handleRequestTrashStory = useCallback(
+    (storyId: string) => {
+      const story = activeStories.find((s) => s.id === storyId);
+      if (!story) return;
+      setPendingConfirm({ kind: 'trash_story', story });
+    },
+    [activeStories],
+  );
 
-  const handleRequestTrashSection = (sectionId: string) => {
+  const handleRequestTrashSection = useCallback((sectionId: string) => {
     const section = sectionsRef.current.find((s) => s.id === sectionId);
     if (!section) return;
     setPendingConfirm({ kind: 'trash_section', section });
-  };
+  }, []);
 
   const handleConfirmAction = async () => {
     if (!pendingConfirm || confirmBusy) return;
@@ -746,6 +942,9 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     try {
       if (pendingConfirm.kind === 'trash_story') {
         const trashedId = pendingConfirm.story.id;
+        if (activeSessionId === trashedId) {
+          await flushAllPendingEdits(trashedId);
+        }
         await trackSync(() => moveStoryToTrashInCloud(uid, trashedId));
         setOlderStories((prev) => prev.filter((s) => s.id !== trashedId));
         if (activeSessionId === trashedId) {
@@ -774,14 +973,11 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
         showToast('Story permanently deleted');
       } else if (pendingConfirm.kind === 'delete_section_forever') {
         setTrashBusyItemId(pendingConfirm.section.id);
-        const parentExists = allKnownStories.some(
-          (s) => s.id === pendingConfirm.section.parentStoryId,
-        );
         if (pendingConfirm.section.audioId) {
           deleteAudioClip(pendingConfirm.section.audioId).catch(() => undefined);
         }
         await trackSync(() =>
-          permanentlyDeleteSectionFromTrashInCloud(uid, pendingConfirm.section, parentExists),
+          permanentlyDeleteSectionFromTrashInCloud(uid, pendingConfirm.section),
         );
         showToast('Section permanently deleted');
       }
@@ -872,6 +1068,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     const targetStyle = activeSession.defaultStyle;
     const targetEnding = activeRefinedEnding;
     const targetModel = activeSession.defaultModel;
+    const activeGlossary = (glossaryDraftRef.current || activeSession.glossary || '').trim();
 
     // 1. Transcribe / polish via server-side Gemini API (returns text + exact usageMetadata)
     const result = await transcribeAudioApi({
@@ -881,6 +1078,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       refinedEnding: targetEnding,
       model: targetModel,
       mode,
+      glossary: activeGlossary || undefined,
       signal,
     });
 
@@ -933,18 +1131,26 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     };
 
     const nextSectionCount = sectionsRef.current.length + 1;
-    await trackSync(() =>
-      createSectionInCloud(uid, targetStoryId, {
-        sectionId,
-        order: Date.now(),
-        initialVersion,
-        audioUrl,
-        storagePath,
-        audioId: fallbackAudioId,
-        audioMeta,
-        nextSectionCount,
-      }),
-    );
+    try {
+      await trackSync(() =>
+        createSectionInCloud(uid, targetStoryId, {
+          sectionId,
+          order: Date.now(),
+          initialVersion,
+          audioUrl,
+          storagePath,
+          audioId: fallbackAudioId,
+          audioMeta,
+          nextSectionCount,
+        }),
+      );
+    } catch (cloudErr) {
+      // Clean up newly uploaded Storage file if Firestore write fails so no orphan audio remains
+      if (storagePath) {
+        await deleteSectionAudioFile(storagePath).catch(() => undefined);
+      }
+      throw cloudErr;
+    }
 
     const styleDesc = formatCompactStyleLabel(targetStyle, targetEnding);
     showToast(
@@ -954,149 +1160,215 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     );
   };
 
-  const handleUpdateSectionContent = (sectionId: string, nextContent: string) => {
-    setSectionDrafts((prev) => ({ ...prev, [sectionId]: nextContent }));
-    sectionDraftsRef.current = { ...sectionDraftsRef.current, [sectionId]: nextContent };
-
-    const existingTimer = sectionDebounceRefs.current[sectionId];
-    if (existingTimer !== undefined) {
-      window.clearTimeout(existingTimer);
-    }
-    sectionDebounceRefs.current[sectionId] = window.setTimeout(() => {
-      void flushSectionDraft(sectionId);
-    }, 650);
-  };
-
-  const handleSelectSectionVersion = async (sectionId: string, versionIndex: number) => {
-    if (!activeSession) return;
-    await flushSectionDraft(sectionId);
-
-    const target = sectionsRef.current.find((s) => s.id === sectionId);
-    if (!target) return;
-    const versions = getSectionVersions(target);
-    const clamped = Math.max(0, Math.min(versionIndex, versions.length - 1));
-    const selected = versions[clamped];
-
-    setGlobalError(null);
-    try {
-      await trackSync(() =>
-        selectSectionVersionInCloud(uid, activeSession.id, sectionId, selected, clamped),
+  const handleUpdateSectionContent = useCallback(
+    (sectionId: string, nextContent: string) => {
+      const targetStoryId = activeSessionIdRef.current;
+      setSectionDrafts((prev) => ({ ...prev, [sectionId]: nextContent }));
+      sectionDraftsRef.current = { ...sectionDraftsRef.current, [sectionId]: nextContent };
+      setSectionSaveStatus((prev) =>
+        prev[sectionId] === 'saving' ? prev : { ...prev, [sectionId]: 'saving' },
       );
-    } catch (err) {
-      setGlobalError(formatCloudErrorMessage(err));
-    }
-  };
 
-  const handleReprocessStyle = async (
-    section: ManuscriptSection,
-    targetStyle: WritingStyle,
-    targetEnding?: VoiceEnding,
-  ) => {
-    if (!activeSession || reprocessingSectionId) return;
-    await flushSectionDraft(section.id);
+      const existingTimer = sectionDebounceRefs.current[sectionId];
+      if (existingTimer !== undefined) {
+        window.clearTimeout(existingTimer);
+      }
+      sectionDebounceRefs.current[sectionId] = window.setTimeout(() => {
+        void flushSectionDraft(sectionId, targetStoryId);
+      }, 650);
+    },
+    [flushSectionDraft],
+  );
 
-    setGlobalError(null);
-    setReprocessingSectionId(section.id);
-    const chosenModel = activeSession.defaultModel;
-    const sectionMode: ProcessingMode = section.mode ?? 'full_polish';
-    const resolvedEnding: VoiceEnding = targetEnding ?? activeRefinedEnding;
-    const currentActiveText = getActiveSectionVersion(section).text;
+  const handleFlushSectionContent = useCallback(
+    (sectionId: string) => {
+      void flushSectionDraft(sectionId);
+    },
+    [flushSectionDraft],
+  );
 
-    try {
-      let nextText = '';
-      let nextUsage = undefined;
-      let usedAudio = false;
+  const handleSelectSectionVersion = useCallback(
+    async (sectionId: string, versionIndex: number) => {
+      const targetStoryId = activeSessionIdRef.current;
+      if (!targetStoryId) return;
+      await flushSectionDraft(sectionId, targetStoryId);
 
-      if (section.storagePath || section.audioUrl) {
-        const cloudBlob = await downloadSectionAudioBlob(section.storagePath, section.audioUrl);
-        if (cloudBlob) {
-          const result = await transcribeAudioApi({
-            blob: cloudBlob,
-            filename: section.audioMeta?.filename || 'recording.webm',
+      const target = sectionsRef.current.find((s) => s.id === sectionId);
+      if (!target) return;
+      const versions = getSectionVersions(target);
+      const clamped = Math.max(0, Math.min(versionIndex, versions.length - 1));
+      const selected = versions[clamped];
+
+      setGlobalError(null);
+      try {
+        await trackSync(() =>
+          selectSectionVersionInCloud(uid, targetStoryId, sectionId, selected, clamped),
+        );
+      } catch (err) {
+        setGlobalError(formatCloudErrorMessage(err));
+      }
+    },
+    [uid, flushSectionDraft, trackSync],
+  );
+
+  const handleSelectSectionVersionSync = useCallback(
+    (sectionId: string, versionIndex: number) => {
+      void handleSelectSectionVersion(sectionId, versionIndex);
+    },
+    [handleSelectSectionVersion],
+  );
+
+  const handleReprocessStyle = useCallback(
+    async (
+      section: ManuscriptSection,
+      targetStyle: WritingStyle,
+      targetEnding?: VoiceEnding,
+      source: ReprocessSource = 'text',
+    ) => {
+      const targetStoryId = activeSessionIdRef.current;
+      if (!targetStoryId || reprocessingSectionIdRef.current) return;
+      await flushSectionDraft(section.id, targetStoryId);
+
+      setGlobalError(null);
+      setReprocessingSectionId(section.id);
+      const chosenModel = activeSession?.defaultModel ?? 'gemini-2.5-flash';
+      const sectionMode: ProcessingMode = section.mode ?? 'full_polish';
+      const resolvedEnding: VoiceEnding = targetEnding ?? activeRefinedEnding;
+      const currentActiveText = getActiveSectionVersion(section).text;
+      const activeGlossary = (glossaryDraftRef.current || activeSession?.glossary || '').trim();
+
+      try {
+        let nextText = '';
+        let nextUsage = undefined;
+        let usedAudio = false;
+
+        if (source === 'audio') {
+          if (section.storagePath || section.audioUrl) {
+            const cloudBlob = await downloadSectionAudioBlob(
+              section.storagePath,
+              section.audioUrl,
+            );
+            if (cloudBlob) {
+              const result = await transcribeAudioApi({
+                blob: cloudBlob,
+                filename: section.audioMeta?.filename || 'recording.webm',
+                style: targetStyle,
+                refinedEnding: resolvedEnding,
+                model: chosenModel,
+                mode: sectionMode,
+                glossary: activeGlossary || undefined,
+              });
+              nextText = result.text;
+              nextUsage = result.usage;
+              usedAudio = true;
+            }
+          }
+
+          if (!usedAudio && section.audioId) {
+            const stored = await getAudioClip(section.audioId);
+            if (stored?.blob) {
+              const result = await transcribeAudioApi({
+                blob: stored.blob,
+                filename: stored.meta.filename,
+                style: targetStyle,
+                refinedEnding: resolvedEnding,
+                model: chosenModel,
+                mode: sectionMode,
+                glossary: activeGlossary || undefined,
+              });
+              nextText = result.text;
+              nextUsage = result.usage;
+              usedAudio = true;
+            }
+          }
+
+          if (!usedAudio) {
+            throw new Error(
+              'Original audio clip could not be loaded from cloud storage. Try restyling from text instead.',
+            );
+          }
+        } else {
+          // Default: fast, low-cost text-only restyling (no Storage download or audio token cost)
+          const result = await restyleTextApi({
+            text: currentActiveText,
             style: targetStyle,
             refinedEnding: resolvedEnding,
             model: chosenModel,
             mode: sectionMode,
+            glossary: activeGlossary || undefined,
           });
           nextText = result.text;
           nextUsage = result.usage;
-          usedAudio = true;
         }
-      }
 
-      if (!usedAudio && section.audioId) {
-        const stored = await getAudioClip(section.audioId);
-        if (stored?.blob) {
-          const result = await transcribeAudioApi({
-            blob: stored.blob,
-            filename: stored.meta.filename,
-            style: targetStyle,
-            refinedEnding: resolvedEnding,
-            model: chosenModel,
-            mode: sectionMode,
-          });
-          nextText = result.text;
-          nextUsage = result.usage;
-          usedAudio = true;
-        }
-      }
-
-      if (!usedAudio) {
-        const result = await restyleTextApi({
-          text: currentActiveText,
+        const now = new Date().toISOString();
+        const nextVersion: SectionVersion = {
+          id: createId('ver'),
+          text: nextText,
           style: targetStyle,
           refinedEnding: resolvedEnding,
           model: chosenModel,
           mode: sectionMode,
-        });
-        nextText = result.text;
-        nextUsage = result.usage;
+          timestamp: now,
+          usage: nextUsage,
+        };
+
+        const existingVersions = getSectionVersions(section);
+        const nextVersions = [...existingVersions, nextVersion];
+
+        await trackSync(() =>
+          appendSectionVersionInCloud(uid, targetStoryId, section.id, nextVersions),
+        );
+
+        const styleDesc = formatCompactStyleLabel(targetStyle, resolvedEnding);
+        showToast(
+          usedAudio
+            ? `Re-listened & saved as v${nextVersions.length} (${styleDesc})`
+            : `Saved as v${nextVersions.length} (${styleDesc})`,
+        );
+      } catch (err) {
+        setGlobalError(formatCloudErrorMessage(err));
+      } finally {
+        setReprocessingSectionId(null);
       }
+    },
+    [
+      uid,
+      activeSession?.defaultModel,
+      activeSession?.glossary,
+      activeRefinedEnding,
+      flushSectionDraft,
+      trackSync,
+      showToast,
+    ],
+  );
 
-      const now = new Date().toISOString();
-      const nextVersion: SectionVersion = {
-        id: createId('ver'),
-        text: nextText,
-        style: targetStyle,
-        refinedEnding: resolvedEnding,
-        model: chosenModel,
-        mode: sectionMode,
-        timestamp: now,
-        usage: nextUsage,
-      };
+  const copyToClipboard = useCallback(
+    async (text: string, label = 'Copied to clipboard') => {
+      try {
+        await navigator.clipboard.writeText(text);
+        showToast(label);
+      } catch {
+        const temp = document.createElement('textarea');
+        temp.value = text;
+        temp.style.position = 'fixed';
+        temp.style.opacity = '0';
+        document.body.appendChild(temp);
+        temp.select();
+        document.execCommand('copy');
+        document.body.removeChild(temp);
+        showToast(label);
+      }
+    },
+    [showToast],
+  );
 
-      const existingVersions = getSectionVersions(section);
-      const nextVersions = [...existingVersions, nextVersion];
-
-      await trackSync(() =>
-        appendSectionVersionInCloud(uid, activeSession.id, section.id, nextVersions),
-      );
-
-      const styleDesc = formatCompactStyleLabel(targetStyle, resolvedEnding);
-      showToast(`Saved as v${nextVersions.length} (${styleDesc})`);
-    } catch (err) {
-      setGlobalError(formatCloudErrorMessage(err));
-    } finally {
-      setReprocessingSectionId(null);
-    }
-  };
-
-  const copyToClipboard = async (text: string, label = 'Copied to clipboard') => {
-    try {
-      await navigator.clipboard.writeText(text);
-      showToast(label);
-    } catch {
-      const temp = document.createElement('textarea');
-      temp.value = text;
-      temp.style.position = 'fixed';
-      temp.style.opacity = '0';
-      document.body.appendChild(temp);
-      temp.select();
-      document.execCommand('copy');
-      document.body.removeChild(temp);
-      showToast(label);
-    }
-  };
+  const handleCopySectionText = useCallback(
+    (txt: string) => {
+      void copyToClipboard(txt, 'Section copied');
+    },
+    [copyToClipboard],
+  );
 
   const activeSessionWithSections: StorySession | null = useMemo(() => {
     if (!activeSession) return null;
@@ -1147,7 +1419,11 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     (s) => getActiveSectionVersion(s).text.trim().length > 0,
   );
 
-  const isSyncing = pendingSyncOps > 0 || isManualSyncing || Object.keys(sectionDrafts).length > 0;
+  const isSyncing =
+    pendingSyncOps > 0 ||
+    isManualSyncing ||
+    Object.keys(sectionDrafts).length > 0 ||
+    glossarySaveStatus === 'saving';
 
   // Manual header sync button handler (flushes local drafts, re-verifies Firestore, pulses "Synced")
   const handleManualSync = async () => {
@@ -1157,14 +1433,8 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     const startedAt = Date.now();
 
     try {
-      // Flush any unsaved title or section drafts before syncing
-      if (titleDirtyRef.current && activeSession) {
-        handleTitleInputBlur();
-      }
-      const pendingDraftIds = Object.keys(sectionDraftsRef.current);
-      if (pendingDraftIds.length > 0) {
-        await Promise.allSettled(pendingDraftIds.map((secId) => flushSectionDraft(secId)));
-      }
+      // Flush any unsaved title, glossary, or section drafts before syncing
+      await flushAllPendingEdits(activeSessionId);
 
       const { online } = await syncFirestoreConnection({
         uid,
@@ -1252,21 +1522,14 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
         isOpen={sidebarOpen}
         userEmail={user.email}
         onSignOut={() => {
-          onSignOut().catch(() => undefined);
+          void flushAllPendingEdits(activeSessionId).finally(() => {
+            onSignOut().catch(() => undefined);
+          });
         }}
         onCloseMobile={() => setSidebarOpen(false)}
         onToggleDesktop={() => setSidebarOpen((prev) => !prev)}
-        onSelectSession={(id) => {
-          titleDirtyRef.current = false;
-          setActiveSessionId(id);
-          setLastOpenedStoryId(id);
-          setActiveView('story');
-          setGlobalError(null);
-        }}
-        onSelectTrash={() => {
-          setActiveView('trash');
-          setGlobalError(null);
-        }}
+        onSelectSession={handleSelectStory}
+        onSelectTrash={handleSelectTrashView}
         onLoadOlderStories={() => {
           void handleLoadOlderStories();
         }}
@@ -1511,13 +1774,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                     {suggestedResumeStory && (
                       <button
                         type="button"
-                        onClick={() => {
-                          titleDirtyRef.current = false;
-                          setActiveSessionId(suggestedResumeStory.id);
-                          setLastOpenedStoryId(suggestedResumeStory.id);
-                          setActiveView('story');
-                          setGlobalError(null);
-                        }}
+                        onClick={() => handleSelectStory(suggestedResumeStory.id)}
                         className="max-w-[280px] truncate rounded-lg bg-[#4338CA] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[#3730A3]"
                       >
                         Open {suggestedResumeStory.title || 'Untitled Story'}
@@ -1586,13 +1843,41 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                   className="font-manuscript w-full border-0 bg-transparent p-0 text-2xl font-semibold tracking-tight text-[#111827] placeholder:text-[#9CA3AF] focus:outline-none sm:text-[28px]"
                 />
 
-                <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-[#6B7280] tabular-nums">
+                <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-[#6B7280] tabular-nums">
                   <span>
                     {orderedSections.length}{' '}
                     {orderedSections.length === 1 ? 'section' : 'sections'}
                   </span>
                   <span aria-hidden="true">·</span>
                   <span>{totalCharacters.toLocaleString()} characters</span>
+                  <span aria-hidden="true" className="text-[#D1D5DB]">
+                    ·
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setGlossaryOpen((prev) => !prev)}
+                    aria-expanded={glossaryOpen}
+                    className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] ${
+                      glossaryOpen
+                        ? 'bg-[#EEF2FF] text-[#312E81]'
+                        : glossaryEntryCount > 0
+                          ? 'text-[#374151] hover:bg-[#F3F4F6] hover:text-[#111827]'
+                          : 'text-[#6B7280] hover:bg-[#F3F4F6] hover:text-[#111827]'
+                    }`}
+                    title="Manage character names, places, and preferred spellings for this story"
+                  >
+                    <BookOpen className="h-3 w-3" aria-hidden="true" />
+                    <span>Glossary</span>
+                    {glossaryEntryCount > 0 && (
+                      <span className="text-[11px] text-[#4338CA]">({glossaryEntryCount})</span>
+                    )}
+                    <ChevronDown
+                      className={`h-3 w-3 transition-transform duration-150 ${
+                        glossaryOpen ? 'rotate-180' : ''
+                      }`}
+                      aria-hidden="true"
+                    />
+                  </button>
                   {sessionTokenStats.totalTokens > 0 && (
                     <>
                       <span aria-hidden="true" className="text-[#D1D5DB]">
@@ -1616,11 +1901,56 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                     </span>
                   )}
                 </div>
+
+                {/* Subtle collapsible Story Glossary panel */}
+                {glossaryOpen && (
+                  <div className="mt-3 rounded-xl border border-[#E5E7EB] bg-[#FAFAFB] px-3.5 py-3">
+                    <div className="mb-1.5 flex items-center justify-between gap-2">
+                      <label
+                        htmlFor="story-glossary-input"
+                        className="text-xs font-medium text-[#374151]"
+                      >
+                        Story Glossary &amp; Preferred Spellings
+                      </label>
+                      <span
+                        className={`text-[11px] ${
+                          glossarySaveStatus === 'saving'
+                            ? 'text-[#4338CA]'
+                            : glossarySaveStatus === 'error'
+                              ? 'text-[#DC2626]'
+                              : 'text-[#9CA3AF]'
+                        }`}
+                      >
+                        {glossarySaveStatus === 'saving'
+                          ? 'Saving…'
+                          : glossarySaveStatus === 'error'
+                            ? 'Save failed'
+                            : 'Saved'}
+                      </span>
+                    </div>
+                    <p className="mb-2 text-[11px] leading-relaxed text-[#6B7280]">
+                      List recurring character names, places, or Burmese/English spellings (one per
+                      line or comma-separated). Automatically injected into Gemini transcription and
+                      restyling prompts for this story.
+                    </p>
+                    <textarea
+                      id="story-glossary-input"
+                      value={glossaryDraft}
+                      onChange={(e) => handleGlossaryInputChange(e.target.value)}
+                      onBlur={handleGlossaryInputBlur}
+                      rows={3}
+                      maxLength={8000}
+                      placeholder="e.g. ဦးမင်းသန့် (U Min Thant), မြစ်ကြီးနား, SarYay, အိပ်မက်"
+                      className="font-manuscript block w-full resize-y rounded-lg border border-[#E5E7EB] bg-white px-3 py-2 text-base text-[#111827] placeholder:text-[#9CA3AF] focus:border-[#4338CA] focus:outline-none sm:text-xs"
+                    />
+                  </div>
+                )}
               </div>
 
               {/* Compact Dictation & Upload Bar */}
               <div className="mb-7">
                 <DictationDock
+                  storyId={activeSession.id}
                   storyTitle={titleDraft || activeSession.title}
                   style={activeSession.defaultStyle}
                   refinedEnding={activeRefinedEnding}
@@ -1677,16 +2007,13 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                       index={idx}
                       activeModel={activeSession.defaultModel}
                       isReprocessing={reprocessingSectionId === section.id}
+                      saveStatus={sectionSaveStatus[section.id] ?? 'saved'}
                       onUpdateContent={handleUpdateSectionContent}
-                      onFlushContent={(secId) => {
-                        void flushSectionDraft(secId);
-                      }}
-                      onSelectVersion={(secId, versionIdx) => {
-                        void handleSelectSectionVersion(secId, versionIdx);
-                      }}
+                      onFlushContent={handleFlushSectionContent}
+                      onSelectVersion={handleSelectSectionVersionSync}
                       onReprocessStyle={handleReprocessStyle}
                       onDeleteSection={handleRequestTrashSection}
-                      onCopyText={(txt) => copyToClipboard(txt, 'Section copied')}
+                      onCopyText={handleCopySectionText}
                     />
                   ))}
                 </div>

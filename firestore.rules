@@ -108,6 +108,7 @@ service cloud.firestore {
           'defaultRefinedEnding',
           'defaultModel',
           'sectionCount',
+          'glossary',
           'isDeleted',
           'deletedAt',
           'createdAt',
@@ -121,6 +122,7 @@ service cloud.firestore {
         && isValidEnding(data.defaultRefinedEnding)
         && isValidModel(data.defaultModel)
         && data.sectionCount is int && data.sectionCount >= 0 && data.sectionCount <= 5000
+        && (!('glossary' in data) || (data.glossary is string && data.glossary.size() <= 8000))
         && (!('isDeleted' in data) || data.isDeleted is bool)
         && (!('deletedAt' in data) || data.deletedAt == null || data.deletedAt is timestamp)
         && data.createdAt is timestamp
@@ -302,6 +304,8 @@ service cloud.firestore {
         && (
           // Action: Rename story
           incoming().diff(existing()).affectedKeys().hasOnly(['title', 'updatedAt'])
+          // Action: Update story glossary
+          || incoming().diff(existing()).affectedKeys().hasOnly(['glossary', 'updatedAt'])
           // Action: Update default style / ending / model preferences
           || incoming().diff(existing()).affectedKeys().hasOnly(['defaultStyle', 'updatedAt'])
           || incoming().diff(existing()).affectedKeys().hasOnly(['defaultRefinedEnding', 'updatedAt'])
