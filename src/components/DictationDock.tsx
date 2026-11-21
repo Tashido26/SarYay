@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
+  ChevronUp,
   Download,
   Loader2,
   Mic,
+  Pause,
+  Play,
   RotateCcw,
   ShieldCheck,
   Square,
@@ -21,8 +24,8 @@ import type {
 import {
   ENDING_LABELS,
   MODE_DESCRIPTIONS,
-  MODE_LABELS,
   MODEL_LABELS,
+  MODEL_SHORT_LABELS,
   STYLE_DESCRIPTIONS,
   STYLE_SHORT_LABELS,
   formatStyleWithEnding,
@@ -127,6 +130,8 @@ export function DictationDock({
   onTranscribe,
 }: DictationDockProps) {
   const [isRecording, setIsRecording] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
+  const [canPauseResume, setCanPauseResume] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [stagedAudio, setStagedAudio] = useState<StagedAudio | null>(null);
   const [isRecoveredDraft, setIsRecoveredDraft] = useState(false);
@@ -135,14 +140,17 @@ export function DictationDock({
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const timerIntervalRef = useRef<number | null>(null);
-  const startTimeRef = useRef<number>(0);
+  const accumulatedDurationMsRef = useRef<number>(0);
+  const segmentStartTimeRef = useRef<number>(0);
   const wakeLockRef = useRef<WakeLockSentinelLike | null>(null);
   const isRecordingRef = useRef<boolean>(false);
+  const isPausedRef = useRef<boolean>(false);
   const storyIdRef = useRef<string>(storyId);
 
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -153,6 +161,7 @@ export function DictationDock({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const stagedUrlRef = useRef<string | null>(null);
+  const settingsPopoverRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     storyIdRef.current = storyId;
@@ -161,6 +170,34 @@ export function DictationDock({
   useEffect(() => {
     isRecordingRef.current = isRecording;
   }, [isRecording]);
+
+  useEffect(() => {
+    isPausedRef.current = isPaused;
+  }, [isPaused]);
+
+  // Dismiss upward settings popover on outside click or Escape
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const handlePointerDown = (e: MouseEvent | TouchEvent) => {
+      const target = e.target as Node | null;
+      if (settingsPopoverRef.current && target && !settingsPopoverRef.current.contains(target)) {
+        setSettingsOpen(false);
+      }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setSettingsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('touchstart', handlePointerDown, { passive: true });
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('touchstart', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [settingsOpen]);
 
   const requestScreenWakeLock = useCallback(async () => {
     if (typeof navigator === 'undefined') return;
@@ -263,6 +300,7 @@ export function DictationDock({
     setIsRecoveredDraft(false);
     setHasFailedAttempt(false);
     setErrorMessage(null);
+    setSettingsOpen(false);
 
     if (!storyId) return;
 
@@ -308,7 +346,7 @@ export function DictationDock({
     };
   }, [stopWaveformAndTracks]);
 
-  // Draw live microphone waveform on canvas while recording
+  // Draw live microphone waveform on canvas while recording (flattens calmly when paused)
   useEffect(() => {
     if (!isRecording) return;
     const canvas = waveformCanvasRef.current;
@@ -323,7 +361,6 @@ export function DictationDock({
 
     const renderFrame = () => {
       animationFrameRef.current = requestAnimationFrame(renderFrame);
-      analyser.getByteFrequencyData(dataArray);
 
       const dpr = window.devicePixelRatio || 1;
       const width = canvas.clientWidth;
@@ -338,10 +375,25 @@ export function DictationDock({
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, width, height);
 
-      const barCount = Math.min(44, Math.max(18, Math.floor(width / 6)));
+      const barCount = Math.min(44, Math.max(16, Math.floor(width / 6)));
       const barWidth = 2.5;
       const gap = (width - barCount * barWidth) / Math.max(1, barCount - 1);
       const centerY = height / 2;
+
+      if (isPausedRef.current) {
+        ctx.fillStyle = '#D1D5DB';
+        for (let i = 0; i < barCount; i++) {
+          const barHeight = 3;
+          const x = i * (barWidth + gap);
+          const y = centerY - barHeight / 2;
+          ctx.beginPath();
+          ctx.roundRect(x, y, barWidth, barHeight, 1.5);
+          ctx.fill();
+        }
+        return;
+      }
+
+      analyser.getByteFrequencyData(dataArray);
 
       for (let i = 0; i < barCount; i++) {
         const binIndex = Math.min(
@@ -353,7 +405,7 @@ export function DictationDock({
         const x = i * (barWidth + gap);
         const y = centerY - barHeight / 2;
 
-        ctx.fillStyle = amplitude > 0.12 ? '#4338CA' : '#CBD5E1';
+        ctx.fillStyle = amplitude > 0.12 ? '#312E81' : '#CBD5E1';
         ctx.beginPath();
         ctx.roundRect(x, y, barWidth, barHeight, 1.5);
         ctx.fill();
@@ -372,6 +424,7 @@ export function DictationDock({
 
   const startRecording = async () => {
     setErrorMessage(null);
+    setSettingsOpen(false);
 
     if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
       setErrorMessage('Microphone recording is not supported in this browser.');
@@ -429,6 +482,9 @@ export function DictationDock({
       }
       mediaRecorderRef.current = recorder;
       chunksRef.current = [];
+      setCanPauseResume(
+        typeof recorder.pause === 'function' && typeof recorder.resume === 'function',
+      );
 
       recorder.ondataavailable = (event: BlobEvent) => {
         if (event.data && event.data.size > 0) {
@@ -437,7 +493,11 @@ export function DictationDock({
       };
 
       recorder.onstop = async () => {
-        const recordedDuration = Math.max(1, (Date.now() - startTimeRef.current) / 1000);
+        const totalMs = isPausedRef.current
+          ? accumulatedDurationMsRef.current
+          : accumulatedDurationMsRef.current + Math.max(0, Date.now() - segmentStartTimeRef.current);
+        const recordedDuration = Math.max(1, totalMs / 1000);
+
         const firstChunkType = chunksRef.current.find((c) => c.type)?.type || '';
         const resolvedMime =
           recorder.mimeType ||
@@ -448,6 +508,7 @@ export function DictationDock({
         chunksRef.current = [];
         stopWaveformAndTracks();
         setIsRecording(false);
+        setIsPaused(false);
 
         if (blob.size === 0) {
           setErrorMessage('No audio data was captured. Please check your microphone input.');
@@ -488,13 +549,16 @@ export function DictationDock({
       recorder.onerror = () => {
         stopWaveformAndTracks();
         setIsRecording(false);
+        setIsPaused(false);
         setErrorMessage('Recording encountered an audio error. Please try again.');
       };
 
       // Continuous capture — never stops on silence until Stop Recording is clicked.
       // Omit timeslice on MP4/AAC & Apple Safari so iOS emits a single complete, seekable MP4 container.
-      startTimeRef.current = Date.now();
+      accumulatedDurationMsRef.current = 0;
+      segmentStartTimeRef.current = Date.now();
       setElapsedSeconds(0);
+      setIsPaused(false);
       const isMp4OrApple =
         appleSafari ||
         (recorder.mimeType || mimeType).toLowerCase().includes('mp4') ||
@@ -508,7 +572,10 @@ export function DictationDock({
       void requestScreenWakeLock();
 
       timerIntervalRef.current = window.setInterval(() => {
-        setElapsedSeconds((Date.now() - startTimeRef.current) / 1000);
+        if (isPausedRef.current) return;
+        const currentMs =
+          accumulatedDurationMsRef.current + Math.max(0, Date.now() - segmentStartTimeRef.current);
+        setElapsedSeconds(currentMs / 1000);
       }, 250);
     } catch (err) {
       stopWaveformAndTracks();
@@ -523,6 +590,34 @@ export function DictationDock({
     }
   };
 
+  const handleTogglePauseResume = () => {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || !isRecording) return;
+
+    try {
+      if (recorder.state === 'recording' && typeof recorder.pause === 'function') {
+        accumulatedDurationMsRef.current += Math.max(0, Date.now() - segmentStartTimeRef.current);
+        setElapsedSeconds(accumulatedDurationMsRef.current / 1000);
+        recorder.pause();
+        if (audioContextRef.current && audioContextRef.current.state === 'running') {
+          audioContextRef.current.suspend().catch(() => undefined);
+        }
+        isPausedRef.current = true;
+        setIsPaused(true);
+      } else if (recorder.state === 'paused' && typeof recorder.resume === 'function') {
+        recorder.resume();
+        if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+          audioContextRef.current.resume().catch(() => undefined);
+        }
+        segmentStartTimeRef.current = Date.now();
+        isPausedRef.current = false;
+        setIsPaused(false);
+      }
+    } catch {
+      setErrorMessage('Pause/Resume is not supported for this audio format on this device.');
+    }
+  };
+
   const stopRecording = () => {
     const recorder = mediaRecorderRef.current;
     if (recorder && recorder.state !== 'inactive') {
@@ -532,6 +627,7 @@ export function DictationDock({
 
   const stageUploadedFile = async (file: File) => {
     setErrorMessage(null);
+    setSettingsOpen(false);
 
     if (!isSupportedAudioFile(file)) {
       setErrorMessage('Unsupported file format. Use MP3, WAV, M4A, WEBM, or OGG.');
@@ -604,6 +700,7 @@ export function DictationDock({
   const handleTranscribeClick = async () => {
     if (!stagedAudio || isTranscribing) return;
     setErrorMessage(null);
+    setSettingsOpen(false);
     setIsTranscribing(true);
 
     const effectiveMode: ProcessingMode =
@@ -622,7 +719,10 @@ export function DictationDock({
         setErrorMessage('Canceled. Your audio is still backed up locally below.');
       } else {
         setHasFailedAttempt(true);
-        const msg = err instanceof Error ? formatCloudErrorMessage(err) : 'Transcription failed. Please try again.';
+        const msg =
+          err instanceof Error
+            ? formatCloudErrorMessage(err)
+            : 'Transcription failed. Please try again.';
         setErrorMessage(msg);
       }
     } finally {
@@ -638,128 +738,182 @@ export function DictationDock({
   };
 
   const isUploadSummary = stagedAudio?.source === 'upload' && uploadMode === 'summarize_structure';
+  const compactStyleText =
+    style === 'refined_flow'
+      ? `Refined (${refinedEnding === 'literary' ? 'Literary' : 'Spoken'})`
+      : STYLE_SHORT_LABELS[style];
+  const compactModelText = MODEL_SHORT_LABELS[model];
+
+  const renderSettingsTriggerAndPopover = (compactWidthClass = 'max-w-[46%] sm:max-w-none') => (
+    <div ref={settingsPopoverRef} className={`relative min-w-0 ${compactWidthClass}`}>
+      {settingsOpen && (
+        <div
+          role="dialog"
+          aria-label="Dictation style and model settings"
+          className="absolute bottom-full left-0 z-50 mb-2.5 w-[min(336px,calc(100vw-24px))] rounded-2xl border border-[#E5E7EB] bg-white p-3.5 shadow-[0_12px_36px_rgba(17,24,39,0.14)]"
+        >
+          <div className="space-y-3">
+            {/* Writing Style */}
+            <div>
+              <p className="mb-1.5 text-[11px] font-medium text-[#6B7280]">Writing style</p>
+              <div
+                role="radiogroup"
+                aria-label="Output writing style"
+                className="grid grid-cols-3 rounded-lg bg-[#F3F4F6] p-0.5"
+              >
+                {(['colloquial', 'literary', 'refined_flow'] as WritingStyle[]).map((option) => {
+                  const active = style === option;
+                  return (
+                    <button
+                      key={option}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      disabled={isTranscribing}
+                      title={STYLE_DESCRIPTIONS[option]}
+                      onClick={() => onStyleChange(option)}
+                      className={`whitespace-nowrap rounded-md px-2 py-1.5 text-xs font-medium transition-all duration-150 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#312E81] disabled:opacity-60 ${
+                        active
+                          ? 'bg-white text-[#312E81] shadow-xs'
+                          : 'text-[#4B5563] hover:text-[#111827]'
+                      }`}
+                    >
+                      {STYLE_SHORT_LABELS[option]}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="mt-1.5 text-[11px] leading-snug text-[#6B7280]">
+                {STYLE_DESCRIPTIONS[style]}
+              </p>
+            </div>
+
+            {/* Refined Flow voice endings (Spoken / Literary) */}
+            {style === 'refined_flow' && (
+              <div>
+                <p className="mb-1.5 text-[11px] font-medium text-[#6B7280]">Voice endings</p>
+                <div
+                  role="radiogroup"
+                  aria-label="Refined Flow voice endings"
+                  className="grid grid-cols-2 rounded-lg bg-[#F3F4F6] p-0.5"
+                >
+                  {(['colloquial', 'literary'] as VoiceEnding[]).map((ending) => {
+                    const active = refinedEnding === ending;
+                    return (
+                      <button
+                        key={ending}
+                        type="button"
+                        role="radio"
+                        aria-checked={active}
+                        disabled={isTranscribing}
+                        title={ENDING_LABELS[ending]}
+                        onClick={() => onRefinedEndingChange(ending)}
+                        className={`whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium transition-all duration-150 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#312E81] disabled:opacity-60 ${
+                          active
+                            ? 'bg-white text-[#312E81] shadow-xs'
+                            : 'text-[#4B5563] hover:text-[#111827]'
+                        }`}
+                      >
+                        {ending === 'colloquial' ? 'Spoken' : 'Literary'}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Gemini Model (Flash / Pro) */}
+            <div className="border-t border-[#F3F4F6] pt-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[11px] font-medium text-[#6B7280]">Model</p>
+                <div
+                  role="radiogroup"
+                  aria-label="Gemini model"
+                  className="inline-flex items-center rounded-lg bg-[#F3F4F6] p-0.5"
+                >
+                  {(['gemini-2.5-flash', 'gemini-2.5-pro'] as GeminiModel[]).map((option) => {
+                    const active = model === option;
+                    return (
+                      <button
+                        key={option}
+                        type="button"
+                        role="radio"
+                        aria-checked={active}
+                        disabled={isTranscribing}
+                        title={MODEL_LABELS[option]}
+                        onClick={() => onModelChange(option)}
+                        className={`whitespace-nowrap rounded-md px-3 py-1 text-xs font-medium transition-all duration-150 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#312E81] disabled:opacity-60 ${
+                          active
+                            ? 'bg-white text-[#312E81] shadow-xs'
+                            : 'text-[#4B5563] hover:text-[#111827]'
+                        }`}
+                      >
+                        {MODEL_SHORT_LABELS[option]}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <button
+        type="button"
+        disabled={isTranscribing}
+        aria-expanded={settingsOpen}
+        aria-haspopup="dialog"
+        onClick={() => setSettingsOpen((prev) => !prev)}
+        title={`${formatStyleWithEnding(style, refinedEnding)} · ${MODEL_LABELS[model]} — Tap to change`}
+        className={`inline-flex h-10 max-w-full items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81] disabled:opacity-60 ${
+          settingsOpen
+            ? 'border-[#312E81]/35 bg-[#EEF2FF] text-[#312E81]'
+            : 'border-[#E5E7EB] bg-[#F8F9FA] text-[#374151] hover:border-[#D1D5DB] hover:bg-[#F3F4F6] hover:text-[#111827]'
+        }`}
+      >
+        <span className="truncate whitespace-nowrap">
+          {compactStyleText} · {compactModelText}
+        </span>
+        <ChevronUp
+          className={`h-3.5 w-3.5 shrink-0 text-[#6B7280] transition-transform duration-150 ${
+            settingsOpen ? 'rotate-180 text-[#312E81]' : ''
+          }`}
+          aria-hidden="true"
+        />
+      </button>
+    </div>
+  );
 
   return (
-    <section
-      aria-label="Voice dictation and audio upload"
-      onDragOver={(e) => {
-        e.preventDefault();
-        if (!isRecording && !isTranscribing) setIsDraggingOver(true);
-      }}
-      onDragLeave={() => setIsDraggingOver(false)}
-      onDrop={handleDrop}
-      className={`rounded-xl border transition-colors duration-150 ${
-        isDraggingOver ? 'border-[#4338CA] bg-[#EEF2FF]/35' : 'border-[#E5E7EB] bg-white'
-      }`}
-    >
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".mp3,.wav,.m4a,.webm,.ogg,audio/*"
-        onChange={handleFileInputChange}
-        className="hidden"
-        aria-hidden="true"
-      />
+    <div className="ios-crisp-dock safe-bottom-dock relative z-30 shrink-0 border-t border-[#E5E7EB] bg-white px-3 pt-2 shadow-[0_-4px_20px_rgba(17,24,39,0.05)] sm:border-t-0 sm:bg-white sm:px-6 sm:pb-4 sm:pt-2 sm:shadow-none">
+      <section
+        aria-label="Voice dictation and audio upload dock"
+        onDragOver={(e) => {
+          e.preventDefault();
+          if (!isRecording && !isTranscribing) setIsDraggingOver(true);
+        }}
+        onDragLeave={() => setIsDraggingOver(false)}
+        onDrop={handleDrop}
+        className={`mx-auto max-w-3xl transition-colors duration-150 sm:rounded-2xl sm:border sm:px-3.5 sm:py-2.5 sm:shadow-[0_4px_24px_rgba(17,24,39,0.07)] ${
+          isDraggingOver
+            ? 'sm:border-[#312E81] bg-[#EEF2FF]/40'
+            : 'sm:border-[#E5E7EB] bg-white'
+        }`}
+      >
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".mp3,.wav,.m4a,.webm,.ogg,audio/*"
+          onChange={handleFileInputChange}
+          className="hidden"
+          aria-hidden="true"
+        />
 
-      {/* Sleek compact toolbar: Style selector + Refined endings (when active) + compact Flash/Pro switch */}
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#F3F4F6] px-4 py-2.5">
-        <div className="flex flex-wrap items-center gap-2">
-          <div
-            role="radiogroup"
-            aria-label="Output writing style"
-            className="inline-flex items-center rounded-lg bg-[#F3F4F6] p-0.5"
-          >
-            {(['colloquial', 'literary', 'refined_flow'] as WritingStyle[]).map((option) => {
-              const active = style === option;
-              return (
-                <button
-                  key={option}
-                  type="button"
-                  role="radio"
-                  aria-checked={active}
-                  disabled={isTranscribing}
-                  title={STYLE_DESCRIPTIONS[option]}
-                  onClick={() => onStyleChange(option)}
-                  className={`whitespace-nowrap rounded-md px-2.5 py-1 text-xs font-medium transition-all duration-150 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:opacity-60 ${
-                    active
-                      ? 'bg-white text-[#312E81] shadow-xs'
-                      : 'text-[#4B5563] hover:text-[#111827]'
-                  }`}
-                >
-                  {STYLE_SHORT_LABELS[option]}
-                </button>
-              );
-            })}
-          </div>
-
-          {style === 'refined_flow' && (
-            <div
-              role="radiogroup"
-              aria-label="Refined Flow voice endings"
-              className="inline-flex items-center rounded-lg border border-[#E5E7EB] bg-[#FAFAFB] p-0.5"
-            >
-              {(['colloquial', 'literary'] as VoiceEnding[]).map((ending) => {
-                const active = refinedEnding === ending;
-                return (
-                  <button
-                    key={ending}
-                    type="button"
-                    role="radio"
-                    aria-checked={active}
-                    disabled={isTranscribing}
-                    title={ENDING_LABELS[ending]}
-                    onClick={() => onRefinedEndingChange(ending)}
-                    className={`whitespace-nowrap rounded-md px-2 py-0.5 text-[11px] font-medium transition-all duration-150 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[#4338CA] disabled:opacity-60 ${
-                      active
-                        ? 'bg-white text-[#312E81] shadow-xs'
-                        : 'text-[#6B7280] hover:text-[#111827]'
-                    }`}
-                  >
-                    {ending === 'colloquial' ? 'Spoken' : 'Literary'}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
-
-        {/* Sleek compact Flash / Pro switch */}
-        <div
-          role="radiogroup"
-          aria-label="Gemini model"
-          className="inline-flex items-center rounded-lg bg-[#F3F4F6] p-0.5"
-        >
-          {(['gemini-2.5-flash', 'gemini-2.5-pro'] as GeminiModel[]).map((option) => {
-            const active = model === option;
-            const shortLabel = option === 'gemini-2.5-flash' ? 'Flash' : 'Pro';
-            return (
-              <button
-                key={option}
-                type="button"
-                role="radio"
-                aria-checked={active}
-                disabled={isTranscribing}
-                title={MODEL_LABELS[option]}
-                onClick={() => onModelChange(option)}
-                className={`whitespace-nowrap rounded-md px-2.5 py-1 text-[11px] font-medium transition-all duration-150 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:opacity-60 ${
-                  active
-                    ? 'bg-white text-[#312E81] shadow-xs'
-                    : 'text-[#4B5563] hover:text-[#111827]'
-                }`}
-              >
-                {shortLabel}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Compact action / recording / staged body */}
-      <div className="px-4 py-3.5">
         {errorMessage && (
           <div
             role="alert"
-            className="mb-3 flex items-start justify-between gap-2.5 overflow-hidden rounded-lg border border-[#FECACA] bg-[#FEF2F2] px-3.5 py-2.5 text-xs text-[#991B1B]"
+            className="mb-2.5 flex items-start justify-between gap-2.5 overflow-hidden rounded-lg border border-[#FECACA] bg-[#FEF2F2] px-3 py-2 text-xs text-[#991B1B]"
           >
             <div className="flex min-w-0 flex-1 items-start gap-2">
               <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#DC2626]" />
@@ -779,46 +933,78 @@ export function DictationDock({
         )}
 
         {isRecording ? (
-          /* Active Continuous Recording (compact single-focus row) */
-          <div className="flex flex-wrap items-center gap-3">
+          /* Active Recording State: expands smoothly in place with live waveform, timer, Pause/Resume & Stop */
+          <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center sm:gap-3">
+            <div className="flex min-w-0 flex-1 items-center gap-2.5">
+              <div className="flex shrink-0 items-center gap-2">
+                <span
+                  className={`inline-block h-2 w-2 rounded-full ${
+                    isPaused ? 'bg-[#D97706]' : 'bg-[#DC2626]'
+                  }`}
+                  aria-hidden="true"
+                />
+                <span
+                  className={`text-xs font-semibold whitespace-nowrap ${
+                    isPaused ? 'text-[#B45309]' : 'text-[#DC2626]'
+                  }`}
+                >
+                  {isPaused ? 'Paused' : 'Recording'}
+                </span>
+                <span className="font-mono text-xs font-medium tabular-nums text-[#111827]">
+                  {formatDuration(elapsedSeconds)}
+                </span>
+              </div>
+
+              <div className="min-w-[96px] flex-1 rounded-lg border border-[#E5E7EB] bg-[#F8F9FA] px-2.5 py-1">
+                <canvas
+                  ref={waveformCanvasRef}
+                  className="block h-6 w-full"
+                  aria-label="Live audio input waveform"
+                />
+              </div>
+            </div>
+
             <div className="flex shrink-0 items-center gap-2">
-              <span
-                className="inline-block h-2 w-2 rounded-full bg-[#DC2626]"
-                aria-hidden="true"
-              />
-              <span className="text-xs font-semibold text-[#DC2626]">Recording</span>
-              <span className="font-mono text-xs font-medium tabular-nums text-[#111827]">
-                {formatDuration(elapsedSeconds)}
-              </span>
-            </div>
+              {canPauseResume && (
+                <button
+                  type="button"
+                  onClick={handleTogglePauseResume}
+                  className="inline-flex h-10 flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-xl border border-[#E5E7EB] bg-white px-3.5 text-xs font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81] sm:flex-initial"
+                >
+                  {isPaused ? (
+                    <>
+                      <Play className="h-3.5 w-3.5 fill-current text-[#312E81]" />
+                      <span>Resume</span>
+                    </>
+                  ) : (
+                    <>
+                      <Pause className="h-3.5 w-3.5" />
+                      <span>Pause</span>
+                    </>
+                  )}
+                </button>
+              )}
 
-            <div className="min-w-[120px] flex-1 rounded-md border border-[#E5E7EB] bg-[#F8F9FA] px-3 py-1.5">
-              <canvas
-                ref={waveformCanvasRef}
-                className="block h-6 w-full"
-                aria-label="Live audio input waveform"
-              />
+              <button
+                type="button"
+                onClick={stopRecording}
+                className="inline-flex h-10 flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-xl bg-[#DC2626] px-4 text-xs font-medium text-white transition-colors duration-150 hover:bg-[#B91C1C] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#DC2626] sm:flex-initial"
+              >
+                <Square className="h-3 w-3 fill-current" />
+                <span>Stop Recording</span>
+              </button>
             </div>
-
-            <button
-              type="button"
-              onClick={stopRecording}
-              className="inline-flex shrink-0 items-center gap-2 whitespace-nowrap rounded-lg bg-[#DC2626] px-4 py-2 text-xs font-medium text-white transition-colors duration-150 hover:bg-[#B91C1C] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#DC2626]"
-            >
-              <Square className="h-3 w-3 fill-current" />
-              <span>Stop Recording</span>
-            </button>
           </div>
         ) : stagedAudio ? (
-          /* Staged Audio Preview, Recovery Banner (if restored/interrupted), Upload Mode & Transcribe */
-          <div className="space-y-3">
+          /* Staged Audio State: compact preview player, settings pill, Discard & Transcribe & Polish */
+          <div className="space-y-2.5">
             {(isRecoveredDraft || hasFailedAttempt) && !isTranscribing && (
               <div
                 role="status"
                 className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#E5E7EB] bg-[#F8F9FA] px-3 py-2 text-xs text-[#374151]"
               >
                 <div className="flex min-w-0 items-center gap-2">
-                  <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-[#4338CA]" aria-hidden="true" />
+                  <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-[#312E81]" aria-hidden="true" />
                   <span className="leading-snug">
                     {hasFailedAttempt
                       ? 'Audio safely backed up on this device. Retry when ready or download a copy.'
@@ -858,8 +1044,9 @@ export function DictationDock({
               compact
             />
 
-            <div className="flex flex-wrap items-center justify-between gap-2.5">
-              {stagedAudio.source === 'upload' ? (
+            {stagedAudio.source === 'upload' && (
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-medium text-[#6B7280]">Upload mode</span>
                 <div
                   role="radiogroup"
                   aria-label="Uploaded audio output mode"
@@ -876,35 +1063,29 @@ export function DictationDock({
                         disabled={isTranscribing}
                         title={MODE_DESCRIPTIONS[option]}
                         onClick={() => setUploadMode(option)}
-                        className={`whitespace-nowrap rounded-md px-2.5 py-1 text-xs font-medium transition-all duration-150 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:opacity-60 ${
+                        className={`whitespace-nowrap rounded-md px-2.5 py-1 text-[11px] font-medium transition-all duration-150 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81] disabled:opacity-60 ${
                           active
                             ? 'bg-white text-[#312E81] shadow-xs'
                             : 'text-[#4B5563] hover:text-[#111827]'
                         }`}
                       >
-                        {MODE_LABELS[option]}
+                        {option === 'full_polish' ? 'Full Polish' : 'Summarize'}
                       </button>
                     );
                   })}
                 </div>
-              ) : (
-                <button
-                  type="button"
-                  disabled={isTranscribing}
-                  onClick={() => clearStagedAudio(true)}
-                  className="inline-flex items-center gap-1.5 whitespace-nowrap text-xs text-[#6B7280] transition-colors hover:text-[#111827] disabled:opacity-50"
-                >
-                  <RotateCcw className="h-3.5 w-3.5" />
-                  <span>Discard</span>
-                </button>
-              )}
+              </div>
+            )}
 
-              <div className="ml-auto flex items-center gap-2">
-                {stagedAudio.source === 'upload' && !isTranscribing && (
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              {renderSettingsTriggerAndPopover('max-w-[44%] sm:max-w-none')}
+
+              <div className="ml-auto flex shrink-0 items-center gap-1.5 sm:gap-2">
+                {!isTranscribing && (
                   <button
                     type="button"
                     onClick={() => clearStagedAudio(true)}
-                    className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 py-2 text-xs font-medium text-[#6B7280] transition-colors hover:bg-[#F3F4F6] hover:text-[#111827]"
+                    className="inline-flex h-10 items-center gap-1.5 whitespace-nowrap rounded-xl px-2.5 text-xs font-medium text-[#6B7280] transition-colors hover:bg-[#F3F4F6] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81]"
                   >
                     <RotateCcw className="h-3.5 w-3.5" />
                     <span>Discard</span>
@@ -915,7 +1096,7 @@ export function DictationDock({
                   <button
                     type="button"
                     onClick={handleCancelTranscription}
-                    className="inline-flex items-center whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-3 py-2 text-xs font-medium text-[#374151] transition-colors hover:bg-[#F9FAFB]"
+                    className="inline-flex h-10 items-center whitespace-nowrap rounded-xl border border-[#E5E7EB] bg-white px-3 text-xs font-medium text-[#374151] transition-colors hover:bg-[#F9FAFB]"
                   >
                     Cancel
                   </button>
@@ -926,7 +1107,7 @@ export function DictationDock({
                   disabled={isTranscribing}
                   onClick={handleTranscribeClick}
                   title={`Process with ${formatStyleWithEnding(style, refinedEnding)} (${MODEL_LABELS[model]})`}
-                  className="inline-flex items-center gap-2 whitespace-nowrap rounded-lg bg-[#4338CA] px-4 py-2 text-xs font-medium text-white transition-colors duration-150 hover:bg-[#3730A3] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-wait disabled:opacity-80"
+                  className="inline-flex h-10 items-center gap-1.5 whitespace-nowrap rounded-xl bg-[#312E81] px-3.5 text-xs font-medium text-white transition-colors duration-150 hover:bg-[#27246A] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81] disabled:cursor-wait disabled:opacity-80 sm:px-4"
                 >
                   {isTranscribing ? (
                     <>
@@ -946,28 +1127,34 @@ export function DictationDock({
             </div>
           </div>
         ) : (
-          /* Idle: Clean side-by-side touch-friendly action buttons */
-          <div className="flex flex-wrap items-center gap-2.5">
-            <button
-              type="button"
-              onClick={startRecording}
-              className="inline-flex flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-lg bg-[#4338CA] px-4 py-2.5 text-sm font-medium text-white transition-colors duration-150 hover:bg-[#3730A3] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] sm:flex-initial sm:py-2"
-            >
-              <Mic className="h-4 w-4 shrink-0" />
-              <span>Start Recording</span>
-            </button>
+          /* Default Idle State: compact single clean row */
+          <div className="flex items-center justify-between gap-2">
+            {renderSettingsTriggerAndPopover('max-w-[44%] sm:max-w-none')}
 
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              className="inline-flex flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-4 py-2.5 text-sm font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] sm:flex-initial sm:py-2"
-            >
-              <Upload className="h-4 w-4 shrink-0" />
-              <span>Upload Audio</span>
-            </button>
+            <div className="flex shrink-0 items-center gap-2">
+              <button
+                type="button"
+                onClick={startRecording}
+                className="inline-flex h-10 items-center justify-center gap-1.5 whitespace-nowrap rounded-xl bg-[#312E81] px-3.5 text-xs font-medium text-white transition-colors duration-150 hover:bg-[#27246A] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81] sm:gap-2 sm:px-4 sm:text-[13px]"
+              >
+                <Mic className="h-4 w-4 shrink-0" />
+                <span>Start Recording</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                aria-label="Upload audio file"
+                title="Upload audio file (MP3, WAV, M4A, WEBM, OGG)"
+                className="inline-flex h-10 w-10 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-xl border border-[#E5E7EB] bg-white text-xs font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81] sm:w-auto sm:px-3.5"
+              >
+                <Upload className="h-4 w-4 shrink-0" />
+                <span className="hidden sm:inline">Upload</span>
+              </button>
+            </div>
           </div>
         )}
-      </div>
-    </section>
+      </section>
+    </div>
   );
 }

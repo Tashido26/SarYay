@@ -196,6 +196,8 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   const lastResumeSyncAtRef = useRef<number>(0);
   const resumeSyncInFlightRef = useRef<boolean>(false);
   const activeSessionIdRef = useRef<string>('');
+  const mainScrollRef = useRef<HTMLElement | null>(null);
+  const pendingScrollSectionIdRef = useRef<string | null>(null);
   const bootstrappedRef = useRef<boolean>(false);
   const initialPurgeRanRef = useRef<boolean>(false);
 
@@ -690,6 +692,10 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       .filter(Boolean).length;
   }, [glossaryDraft]);
 
+  const handleScrollToTop = useCallback(() => {
+    mainScrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+  }, []);
+
   // Merge any in-flight local typing drafts into displayed sections (unchanged sections keep ref identity for React.memo)
   const orderedSections = useMemo(() => {
     const sorted = sortSectionsChronologically(sections);
@@ -709,6 +715,24 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       };
     });
   }, [sections, sectionDrafts]);
+
+  // Smoothly scroll newly transcribed section into view at the bottom of the manuscript
+  useEffect(() => {
+    const targetId = pendingScrollSectionIdRef.current;
+    if (!targetId) return;
+    if (!orderedSections.some((sec) => sec.id === targetId)) return;
+    pendingScrollSectionIdRef.current = null;
+
+    window.requestAnimationFrame(() => {
+      const container = mainScrollRef.current;
+      const el = container?.querySelector<HTMLElement>(`[data-section-id="${targetId}"]`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      } else if (container) {
+        container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+      }
+    });
+  }, [orderedSections]);
 
   // Cumulative token usage & estimated USD cost across all versions of active sections in this story
   const sessionTokenStats = useMemo(() => {
@@ -1232,6 +1256,8 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       throw cloudErr;
     }
 
+    pendingScrollSectionIdRef.current = sectionId;
+
     const styleDesc = formatCompactStyleLabel(targetStyle, targetEnding);
     showToast(
       mode === 'summarize_structure'
@@ -1682,13 +1708,21 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                     </span>
                   </>
                 )}
-                <span className="min-w-0 truncate font-medium text-[#374151]">
-                  {activeView === 'trash'
-                    ? 'Trash'
-                    : activeSession
-                      ? titleDraft || activeSession.title || 'Untitled Story'
-                      : 'SarYay'}
-                </span>
+                {activeView === 'story' && activeSession ? (
+                  <button
+                    type="button"
+                    onClick={handleScrollToTop}
+                    title="Scroll to top (Title & Glossary)"
+                    aria-label="Scroll to top of story"
+                    className="-mx-1.5 min-w-0 truncate rounded-md px-1.5 py-1 text-left font-medium text-[#374151] transition-colors duration-150 hover:bg-[#F3F4F6] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA]"
+                  >
+                    {titleDraft || activeSession.title || 'Untitled Story'}
+                  </button>
+                ) : (
+                  <span className="min-w-0 truncate font-medium text-[#374151]">
+                    {activeView === 'trash' ? 'Trash' : 'SarYay'}
+                  </span>
+                )}
 
                 {/* Minimal Cloud Sync Indicator + Subtle Synced Pulse */}
                 <span
@@ -1793,7 +1827,12 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
         </header>
 
         {/* Scrollable main canvas (either Trash Bin view or active Story workspace) */}
-        <main className="safe-bottom-scroll flex-1 overflow-y-auto bg-white">
+        <main
+          ref={mainScrollRef}
+          className={`flex-1 overflow-y-auto bg-white ${
+            activeView === 'story' && activeSession ? 'pb-6' : 'safe-bottom-scroll'
+          }`}
+        >
           {globalError && (activeView === 'trash' || !activeSession) && (
             <div className="mx-auto max-w-[780px] px-5 pt-6 sm:px-10">
               <div
@@ -2039,36 +2078,17 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                 )}
               </div>
 
-              {/* Compact Dictation & Upload Bar */}
-              <div className="mb-7">
-                <DictationDock
-                  storyId={activeSession.id}
-                  storyTitle={titleDraft || activeSession.title}
-                  style={activeSession.defaultStyle}
-                  refinedEnding={activeRefinedEnding}
-                  model={activeSession.defaultModel}
-                  onStyleChange={(nextStyle) => {
-                    void handleStyleChange(nextStyle);
-                  }}
-                  onRefinedEndingChange={(nextEnding) => {
-                    void handleRefinedEndingChange(nextEnding);
-                  }}
-                  onModelChange={(nextModel) => {
-                    void handleModelChange(nextModel);
-                  }}
-                  onTranscribe={handleTranscribeAudio}
-                />
-              </div>
-
               {/* Global error banner */}
               {globalError && (
                 <div
                   role="alert"
                   className="mb-6 flex items-start justify-between gap-3 rounded-lg border border-[#FECACA] bg-[#FEF2F2] px-4 py-3 text-xs text-[#991B1B]"
                 >
-                  <div className="flex items-start gap-2.5">
+                  <div className="flex min-w-0 flex-1 items-start gap-2.5">
                     <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-[#DC2626]" />
-                    <p className="leading-relaxed">{globalError}</p>
+                    <p className="min-w-0 flex-1 break-words leading-relaxed [overflow-wrap:anywhere]">
+                      {globalError}
+                    </p>
                   </div>
                   <button
                     type="button"
@@ -2087,32 +2107,63 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                   <Loader2 className="h-3.5 w-3.5 animate-spin text-[#4338CA]" />
                   <span>Syncing sections…</span>
                 </div>
-              ) : null}
-
-              {/* Manuscript Sections Stream */}
-              {orderedSections.length > 0 && (
-                <div className="space-y-6 pb-16">
+              ) : orderedSections.length === 0 ? (
+                <div className="border-t border-[#F3F4F6] py-12 text-center">
+                  <p className="text-sm text-[#6B7280]">Your manuscript is ready.</p>
+                  <p className="mt-1 text-xs text-[#9CA3AF]">
+                    Use the dock below to start recording or upload an audio clip.
+                  </p>
+                </div>
+              ) : (
+                /* Manuscript Sections Stream */
+                <div className="space-y-6 pb-8">
                   {orderedSections.map((section, idx) => (
-                    <SectionBlock
+                    <div
                       key={section.id}
-                      section={section}
-                      index={idx}
-                      activeModel={activeSession.defaultModel}
-                      isReprocessing={reprocessingSectionId === section.id}
-                      saveStatus={sectionSaveStatus[section.id] ?? 'saved'}
-                      onUpdateContent={handleUpdateSectionContent}
-                      onFlushContent={handleFlushSectionContent}
-                      onSelectVersion={handleSelectSectionVersionSync}
-                      onReprocessStyle={handleReprocessStyle}
-                      onDeleteSection={handleRequestTrashSection}
-                      onCopyText={handleCopySectionText}
-                    />
+                      data-section-id={section.id}
+                      className="scroll-mt-6"
+                    >
+                      <SectionBlock
+                        section={section}
+                        index={idx}
+                        activeModel={activeSession.defaultModel}
+                        isReprocessing={reprocessingSectionId === section.id}
+                        saveStatus={sectionSaveStatus[section.id] ?? 'saved'}
+                        onUpdateContent={handleUpdateSectionContent}
+                        onFlushContent={handleFlushSectionContent}
+                        onSelectVersion={handleSelectSectionVersionSync}
+                        onReprocessStyle={handleReprocessStyle}
+                        onDeleteSection={handleRequestTrashSection}
+                        onCopyText={handleCopySectionText}
+                      />
+                    </div>
                   ))}
                 </div>
               )}
             </div>
           )}
         </main>
+
+        {/* Sleek Sticky Bottom Dictation Dock anchored cleanly to bottom of viewport */}
+        {activeView === 'story' && activeSession && (
+          <DictationDock
+            storyId={activeSession.id}
+            storyTitle={titleDraft || activeSession.title}
+            style={activeSession.defaultStyle}
+            refinedEnding={activeRefinedEnding}
+            model={activeSession.defaultModel}
+            onStyleChange={(nextStyle) => {
+              void handleStyleChange(nextStyle);
+            }}
+            onRefinedEndingChange={(nextEnding) => {
+              void handleRefinedEndingChange(nextEnding);
+            }}
+            onModelChange={(nextModel) => {
+              void handleModelChange(nextModel);
+            }}
+            onTranscribe={handleTranscribeAudio}
+          />
+        )}
       </div>
 
       {/* Mandatory Confirmation Dialog for Soft Delete & Delete Forever */}
@@ -2136,7 +2187,9 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
         <div
           role="status"
           aria-live="polite"
-          className="safe-toast-bottom fixed right-4 z-50 rounded-lg bg-[#111827] px-4 py-2.5 text-xs font-medium text-white shadow-sm sm:right-5"
+          className={`${
+            activeView === 'story' && activeSession ? 'safe-toast-above-dock' : 'safe-toast-bottom'
+          } fixed right-4 z-50 rounded-lg bg-[#111827] px-4 py-2.5 text-xs font-medium text-white shadow-sm sm:right-5`}
         >
           {toastMessage}
         </div>

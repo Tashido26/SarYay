@@ -30,8 +30,9 @@
   }
 }
 
-/* Force crisp, opaque GPU compositing layer on iOS WebKit PWA headers */
-.ios-crisp-header {
+/* Force crisp, opaque GPU compositing layer on iOS WebKit PWA headers & bottom dock */
+.ios-crisp-header,
+.ios-crisp-dock {
   background-color: #ffffff;
   transform: translateZ(0);
   -webkit-transform: translateZ(0);
@@ -49,12 +50,20 @@
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
+.safe-bottom-dock {
+  padding-bottom: calc(0.625rem + env(safe-area-inset-bottom, 0px));
+}
+
 .safe-bottom-scroll {
   padding-bottom: calc(2rem + env(safe-area-inset-bottom, 0px));
 }
 
 .safe-toast-bottom {
   bottom: calc(1.25rem + env(safe-area-inset-bottom, 0px));
+}
+
+.safe-toast-above-dock {
+  bottom: calc(5.25rem + env(safe-area-inset-bottom, 0px));
 }
 
 .font-manuscript {
