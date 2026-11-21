@@ -13,6 +13,16 @@ export interface AudioMeta {
   sizeBytes: number;
 }
 
+export interface SectionVersion {
+  id: string;
+  text: string;
+  style: WritingStyle;
+  refinedEnding?: VoiceEnding;
+  model: GeminiModel;
+  mode?: ProcessingMode;
+  timestamp: string;
+}
+
 export interface ManuscriptSection {
   id: string;
   content: string;
@@ -22,6 +32,8 @@ export interface ManuscriptSection {
   mode?: ProcessingMode;
   audioId?: string;
   audioMeta?: AudioMeta;
+  versions?: SectionVersion[];
+  activeVersionIndex?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -63,7 +75,7 @@ export const STYLE_DESCRIPTIONS: Record<WritingStyle, string> = {
   colloquial: 'Natural spoken Burmese endings, smooth and readable for dialogue or essays',
   literary: 'Formal written Burmese prose crafted for novels, stories, and published articles',
   refined_flow:
-    'Fixes back-and-forth jumps and merges repetitive thoughts while keeping your exact voice',
+    'Light-touch edit that trims looped thoughts and interrupted jumps while preserving your exact voice',
 };
 
 export const ENDING_LABELS: Record<VoiceEnding, string> = {
@@ -87,6 +99,11 @@ export const MODEL_LABELS: Record<GeminiModel, string> = {
   'gemini-2.5-pro': 'Gemini 2.5 Pro',
 };
 
+export const MODEL_SHORT_LABELS: Record<GeminiModel, string> = {
+  'gemini-2.5-flash': 'Flash',
+  'gemini-2.5-pro': 'Pro',
+};
+
 export function formatStyleWithEnding(
   style: WritingStyle,
   refinedEnding?: VoiceEnding,
@@ -96,4 +113,49 @@ export function formatStyleWithEnding(
     return `${STYLE_LABELS.refined_flow} (${endingText})`;
   }
   return STYLE_LABELS[style];
+}
+
+export function formatCompactStyleLabel(
+  style: WritingStyle,
+  refinedEnding?: VoiceEnding,
+): string {
+  if (style === 'refined_flow') {
+    const endingText = refinedEnding === 'literary' ? 'Literary' : 'Colloquial';
+    return `Refined Flow · ${endingText}`;
+  }
+  return STYLE_SHORT_LABELS[style];
+}
+
+export function getSectionVersions(section: ManuscriptSection): SectionVersion[] {
+  if (Array.isArray(section.versions) && section.versions.length > 0) {
+    return section.versions;
+  }
+  return [
+    {
+      id: `${section.id}_v1`,
+      text: section.content,
+      style: section.style,
+      refinedEnding: section.style === 'refined_flow' ? (section.refinedEnding ?? 'colloquial') : undefined,
+      model: section.model,
+      mode: section.mode,
+      timestamp: section.updatedAt || section.createdAt,
+    },
+  ];
+}
+
+export function getActiveVersionIndex(section: ManuscriptSection): number {
+  const versions = getSectionVersions(section);
+  if (
+    typeof section.activeVersionIndex === 'number' &&
+    section.activeVersionIndex >= 0 &&
+    section.activeVersionIndex < versions.length
+  ) {
+    return section.activeVersionIndex;
+  }
+  return versions.length - 1;
+}
+
+export function getActiveSectionVersion(section: ManuscriptSection): SectionVersion {
+  const versions = getSectionVersions(section);
+  return versions[getActiveVersionIndex(section)];
 }

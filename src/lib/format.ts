@@ -1,4 +1,5 @@
 import type { ManuscriptSection, StorySession } from '../types.ts';
+import { getActiveSectionVersion } from '../types.ts';
 
 export function formatDuration(totalSeconds: number): string {
   if (!Number.isFinite(totalSeconds) || totalSeconds < 0) return '00:00';
@@ -159,7 +160,7 @@ export function sortSectionsChronologically(
 export function compileFullStoryPlainText(session: StorySession): string {
   const ordered = sortSectionsChronologically(session.sections);
   const body = ordered
-    .map((s) => s.content.trim())
+    .map((s) => getActiveSectionVersion(s).text.trim())
     .filter(Boolean)
     .join('\n\n');
   if (!body) return '';
@@ -170,7 +171,7 @@ export function compileFullStoryMarkdown(session: StorySession): string {
   const title = session.title.trim() || 'Untitled Story';
   const ordered = sortSectionsChronologically(session.sections);
   const body = ordered
-    .map((section) => section.content.trim())
+    .map((section) => getActiveSectionVersion(section).text.trim())
     .filter(Boolean)
     .join('\n\n');
 

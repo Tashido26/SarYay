@@ -2,6 +2,8 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   Check,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Copy,
   Headphones,
   Loader2,
@@ -14,7 +16,13 @@ import type {
   VoiceEnding,
   WritingStyle,
 } from '../types.ts';
-import { MODEL_LABELS, formatStyleWithEnding } from '../types.ts';
+import {
+  MODEL_LABELS,
+  MODEL_SHORT_LABELS,
+  formatCompactStyleLabel,
+  getActiveVersionIndex,
+  getSectionVersions,
+} from '../types.ts';
 import { formatDuration, formatTimestamp } from '../lib/format.ts';
 import { AudioPlayerBar } from './AudioPlayerBar.tsx';
 
@@ -25,10 +33,10 @@ interface ReprocessOption {
 }
 
 const REPROCESS_OPTIONS: ReprocessOption[] = [
-  { label: 'Colloquial Style', style: 'colloquial' },
-  { label: 'Literary Style', style: 'literary' },
-  { label: 'Refined Flow (Colloquial)', style: 'refined_flow', refinedEnding: 'colloquial' },
-  { label: 'Refined Flow (Literary)', style: 'refined_flow', refinedEnding: 'literary' },
+  { label: 'Colloquial', style: 'colloquial' },
+  { label: 'Literary', style: 'literary' },
+  { label: 'Refined Flow · Colloquial', style: 'refined_flow', refinedEnding: 'colloquial' },
+  { label: 'Refined Flow · Literary', style: 'refined_flow', refinedEnding: 'literary' },
 ];
 
 interface SectionBlockProps {
@@ -37,6 +45,7 @@ interface SectionBlockProps {
   activeModel: GeminiModel;
   isReprocessing: boolean;
   onUpdateContent: (sectionId: string, nextContent: string) => void;
+  onSelectVersion: (sectionId: string, versionIndex: number) => void;
   onReprocessStyle: (
     section: ManuscriptSection,
     targetStyle: WritingStyle,
@@ -52,6 +61,7 @@ export function SectionBlock({
   activeModel,
   isReprocessing,
   onUpdateContent,
+  onSelectVersion,
   onReprocessStyle,
   onDeleteSection,
   onCopyText,
@@ -65,6 +75,11 @@ export function SectionBlock({
   const [saveLabel, setSaveLabel] = useState<'Saved' | 'Saving…'>('Saved');
   const saveTimerRef = useRef<number | null>(null);
 
+  const versions = getSectionVersions(section);
+  const activeVersionIndex = getActiveVersionIndex(section);
+  const activeVersion = versions[activeVersionIndex];
+  const activeMode = activeVersion.mode ?? section.mode;
+
   const syncTextareaHeight = () => {
     const el = textareaRef.current;
     if (!el) return;
@@ -74,7 +89,7 @@ export function SectionBlock({
 
   useLayoutEffect(() => {
     syncTextareaHeight();
-  }, [section.content]);
+  }, [activeVersion.text, activeVersionIndex]);
 
   useEffect(() => {
     const onResize = () => syncTextareaHeight();
@@ -118,15 +133,15 @@ export function SectionBlock({
   };
 
   const handleCopy = () => {
-    onCopyText(section.content);
+    onCopyText(activeVersion.text);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1800);
   };
 
   const isCurrentOption = (opt: ReprocessOption) => {
-    if (opt.style !== section.style) return false;
+    if (opt.style !== activeVersion.style) return false;
     if (opt.style === 'refined_flow') {
-      return (section.refinedEnding ?? 'colloquial') === (opt.refinedEnding ?? 'colloquial');
+      return (activeVersion.refinedEnding ?? 'colloquial') === (opt.refinedEnding ?? 'colloquial');
     }
     return true;
   };
@@ -136,22 +151,62 @@ export function SectionBlock({
       className="group border-t border-[#E5E7EB] pt-7 pb-3 first:border-t-0 first:pt-2"
       aria-label={`Manuscript section ${index + 1}`}
     >
-      {/* Quiet unboxed metadata header + section actions */}
+      {/* Quiet unboxed metadata header + version switcher + section actions */}
       <div className="mb-3 flex flex-wrap items-center justify-between gap-y-2 gap-x-4">
         <div className="flex flex-wrap items-center gap-1.5 text-xs text-[#6B7280] tabular-nums">
           <span className="font-semibold text-[#111827]">
             Section {String(index + 1).padStart(2, '0')}
           </span>
+
+          {versions.length > 1 && (
+            <div
+              role="group"
+              aria-label="Version history"
+              className="mx-0.5 inline-flex items-center rounded-md border border-[#E5E7EB] bg-[#F8F9FA] text-[11px] font-medium text-[#374151]"
+            >
+              <button
+                type="button"
+                disabled={activeVersionIndex <= 0 || isReprocessing}
+                onClick={() => onSelectVersion(section.id, activeVersionIndex - 1)}
+                aria-label="Previous version"
+                title="Previous version"
+                className="inline-flex h-5 w-5 items-center justify-center rounded-l-[5px] text-[#4B5563] transition-colors hover:bg-white hover:text-[#111827] disabled:cursor-not-allowed disabled:opacity-35"
+              >
+                <ChevronLeft className="h-3 w-3" />
+              </button>
+              <span
+                className="select-none px-1.5 text-[11px] font-medium text-[#111827]"
+                title={`Viewing version ${activeVersionIndex + 1} of ${versions.length}`}
+              >
+                {activeVersionIndex + 1} / {versions.length}
+              </span>
+              <button
+                type="button"
+                disabled={activeVersionIndex >= versions.length - 1 || isReprocessing}
+                onClick={() => onSelectVersion(section.id, activeVersionIndex + 1)}
+                aria-label="Next version"
+                title="Next version"
+                className="inline-flex h-5 w-5 items-center justify-center rounded-r-[5px] text-[#4B5563] transition-colors hover:bg-white hover:text-[#111827] disabled:cursor-not-allowed disabled:opacity-35"
+              >
+                <ChevronRight className="h-3 w-3" />
+              </button>
+            </div>
+          )}
+
           <span aria-hidden="true">·</span>
-          <span>{formatStyleWithEnding(section.style, section.refinedEnding)}</span>
-          {section.mode === 'summarize_structure' ? (
+          <span className="font-medium text-[#374151]">
+            {formatCompactStyleLabel(activeVersion.style, activeVersion.refinedEnding)}
+          </span>
+          {activeMode === 'summarize_structure' ? (
             <>
               <span aria-hidden="true">·</span>
-              <span>Structured Summary</span>
+              <span>Summary</span>
             </>
           ) : null}
           <span aria-hidden="true">·</span>
-          <span>{MODEL_LABELS[section.model]}</span>
+          <span title={MODEL_LABELS[activeVersion.model]}>
+            {MODEL_SHORT_LABELS[activeVersion.model]}
+          </span>
           {section.audioMeta && section.audioMeta.durationSec > 0 ? (
             <>
               <span aria-hidden="true">·</span>
@@ -161,7 +216,7 @@ export function SectionBlock({
             </>
           ) : null}
           <span aria-hidden="true">·</span>
-          <span>{formatTimestamp(section.updatedAt)}</span>
+          <span>{formatTimestamp(activeVersion.timestamp)}</span>
           <span aria-hidden="true">·</span>
           <span className={saveLabel === 'Saving…' ? 'text-[#4338CA]' : 'text-[#6B7280]'}>
             {saveLabel}
@@ -204,7 +259,7 @@ export function SectionBlock({
             )}
           </button>
 
-          {/* Re-process style menu supporting all 3 styles & Refined Flow endings */}
+          {/* Re-process style menu supporting all 3 styles & Refined Flow endings (non-destructive) */}
           <div ref={menuRef} className="relative">
             <button
               type="button"
@@ -212,7 +267,7 @@ export function SectionBlock({
               aria-haspopup="menu"
               aria-expanded={menuOpen}
               onClick={() => setMenuOpen((prev) => !prev)}
-              title={`Re-process this section with a different style using ${MODEL_LABELS[activeModel]}`}
+              title={`Create a new version in another style using ${MODEL_LABELS[activeModel]} (keeps previous versions)`}
               className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium text-[#4338CA] transition-colors duration-150 hover:bg-[#EEF2FF] hover:text-[#312E81] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-wait disabled:opacity-60"
             >
               {isReprocessing ? (
@@ -307,12 +362,12 @@ export function SectionBlock({
       <div className="rounded-lg transition-colors duration-150 focus-within:bg-[#FAFAFC]">
         <textarea
           ref={textareaRef}
-          value={section.content}
+          value={activeVersion.text}
           onChange={handleTextChange}
           disabled={isReprocessing}
           rows={3}
           spellCheck={false}
-          aria-label={`Editable prose for section ${index + 1}`}
+          aria-label={`Editable prose for section ${index + 1}, version ${activeVersionIndex + 1} of ${versions.length}`}
           placeholder="Your transcribed manuscript prose will appear here…"
           className="font-manuscript block w-full resize-none overflow-hidden rounded-lg border border-transparent bg-transparent px-1 py-1.5 text-[16.5px] text-[#111827] placeholder:text-[#9CA3AF] focus:border-[#E5E7EB] focus:px-3 focus:outline-none disabled:opacity-60"
         />

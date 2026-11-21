@@ -62,26 +62,55 @@ export function normalizeAudioMimeType(
   return 'audio/webm';
 }
 
-const STEP_3_READY_TO_USE_BURMESE_AUDIT = `STEP 3 — MANDATORY FINAL BURMESE SPELLING & GRAMMAR AUDIT (READY-TO-USE GATE):
+function buildFinalBurmeseAudit(
+  style: WritingStyle,
+  refinedEnding: VoiceEnding = 'colloquial',
+): string {
+  const effectiveVoice: VoiceEnding =
+    style === 'refined_flow' ? refinedEnding : style;
+
+  const colloquialGuard =
+    effectiveVoice === 'colloquial'
+      ? `\n- STRICT COLLOQUIAL VOICE AUDIT (ZERO LITERARY DRIFT): Verify that NOT A SINGLE literary connector or formal particle crept in during editing — eliminate any "ကာ" (replace with "ပြီး"), "သာ" (replace with "ပဲ"), "၍" (replace with "ပြီး"/"လို့"), "သော" (replace with "တဲ့"), "မည့်" (replace with "မယ့်"), "၏" (replace with "ရဲ့"), or formal "သည်/မည်" endings unless spoken verbatim by the speaker.`
+      : '';
+
+  return `STEP 3 — MANDATORY FINAL BURMESE SPELLING & GRAMMAR AUDIT (READY-TO-USE GATE):
 Before outputting ANY text, perform a strict, word-by-word internal proofreading pass over the entire Burmese and mixed English draft so the result is completely publication-ready and requires zero manual editing afterward:
 - Fix all Burmese phonetic and homophone spelling errors (အသံတူ စာလုံးပေါင်းကွဲ / သတ်ပုံအမှား) strictly based on surrounding context:
   * Always write "အိပ်မက်" (dream) instead of "အိမ်မက်".
   * Strictly distinguish "တတ်" (skill, knowledge, capability, tendency — e.g., "programming မတတ်ဘူး", "ရေးတတ်တယ်", "ဖြစ်တတ်သည်") vs. "တက်" (climb, rise, attend, increase — e.g., "တောင်တက်", "ကျောင်းတက်", "ဈေးတက်").
   * Strictly distinguish "ရွေ့" / "မရွေ့" / "မပျက်မကွက်" (move/shift/intact/unchanged — e.g., "အစအဆုံး မရွေ့ လိုချင်တာလား") vs. "ရွေး" / "မရွေး" (choose/select — e.g., "မရွေးချယ်", "ဘယ်သူမရွေး").
   * Fix dropped noun prefixes, misheard words, and incomplete particles (e.g., "ကူညီနဲ့" -> "အကူအညီနဲ့", clipped or misheard verb endings and postpositions).
-  * Carefully verify Burmese final consonants (အသတ်အမှားများ — especially ကသတ် "က်", တသတ် "တ်", ပသတ် "ပ်", နသတ် "န်", မသတ် "မ်", ငသတ် "င်") so every single word is spelled accurately in Unicode Burmese.
+  * Carefully verify Burmese final consonants (အသတ်အမှားများ — especially ကသတ် "က်", တသတ် "တ်", ပသတ် "ပ်", နသတ် "န်", မသတ် "မ်", ငသတ် "င်") so every single word is spelled accurately in Unicode Burmese.${colloquialGuard}
 - Enforce proper Burmese punctuation ("။" for sentence endings and "၊" for clause pauses), clean spacing, and accurate mixed English spelling.
 - Confirm every sentence reads smoothly, naturally, and grammatically with zero awkward phrasing, zero leftover filler words, and zero typos.`;
+}
 
-const REFINED_FLOW_STRUCTURAL_RULES = `REFINED FLOW & TIGHTENED STRUCTURAL EDITING RULES (အတွေးစဉ် ပြန်စီပြီး ကျစ်လျစ်ဟန်):
-- RULE A — MERGE CIRCULAR THOUGHTS & REMOVE CONCEPTUAL REPETITION (ဝေ့လည်ကြောင်ပတ် ဖြစ်နေသည်များကို ကျစ်လျစ်အောင် ပေါင်းစည်းခြင်း):
-  * When the speaker thinks aloud and repeats the same idea, point, or example 2–3 times in a circle using slightly different wording, DO NOT keep all the redundant variations.
-  * Consolidate and merge those overlapping sentences into ONE clear, sharp, well-expressed statement using the speaker's exact vocabulary, phrasing style, and tone.
-  * CRITICAL: This is NOT a high-level summary. NEVER drop distinct details, sub-points, concrete examples, or narrative nuances—only eliminate redundant restatements of the exact same point.
-- RULE B — REORDER DISJOINTED JUMPS FOR LOGICAL NARRATIVE FLOW (ရှေ့နောက် ပြတ်တောက်သွားသော အကြောင်းအရာများကို အစီအစဉ် ပြန်ညှိခြင်း):
-  * Detect disconnected narrative threads where the speaker starts Topic A, suddenly interjects Topic B mid-thought, and then remembers to finish Topic A later.
-  * Rearrange the sentences/paragraphs so related thoughts stay together in a smooth, logical sequence (completing Topic A cleanly before transitioning smoothly into Topic B), unless a deliberate flashback or callback works better stylistically.
-  * Create seamless, natural transitions between rearranged parts while preserving 100% of the speaker's authentic Burmese voice and rhythm.`;
+function buildRefinedFlowRules(refinedEnding: VoiceEnding = 'colloquial'): string {
+  const zeroLiteraryDriftBlock =
+    refinedEnding === 'colloquial'
+      ? `
+- ZERO LITERARY VOCABULARY DRIFT (STRICT SPOKEN BURMESE BOUNDARY):
+  * NEVER insert literary Burmese connectors, particles, or formal phrasing such as:
+    - "ကာ" (e.g., NEVER write "ဖယ်ရှားကာ" -> ALWAYS write "ဖယ်ရှားပြီး")
+    - "သာ" (e.g., NEVER write "စိတ်ကူးတွေသာရှိပြီး" -> ALWAYS write "စိတ်ကူးပဲရှိပြီး")
+    - "၍" (use natural spoken "ပြီး" or "လို့")
+    - "သော" (use natural spoken "တဲ့")
+    - "မည့်" (use natural spoken "မယ့်")
+    - "၏" (use natural spoken "ရဲ့")
+    - Formal "သည်" / "မည်" / "ဖြစ်သည်" (keep natural spoken "တယ်" / "မယ်" / "တာ" / "ဖြစ်တယ်")
+  * Keep 100% authentic everyday spoken Burmese (စကားပြောဟန်) matching the speaker's exact natural rhythm, phrasing, and word choices.`
+      : '';
+
+  return `REFINED FLOW & TIGHTENED — LIGHT-TOUCH SURGICAL EDITING RULES (အတွေးစဉ် ပြန်စီပြီး ကျစ်လျစ်ဟန်):
+- NO REWRITING OR SUMMARIZING:
+  * Do NOT rewrite the passage from scratch and do NOT compress or shorten its overall length.
+  * Keep EVERY SINGLE point, example, story detail, explanation, and nuance the speaker mentioned.
+- SURGICAL EDITS ONLY (MINIMAL INTERVENTION):
+  1. Only trim or merge sentences where the speaker literally repeats the *exact same thought* in a loop (ဝေ့လည်ကြောင်ပတ် ထပ်ပြောနေတာမျိုးသာ ဖယ်ရှား/ပေါင်းစည်းပါ). Keep distinct sub-points and examples intact.
+  2. Only reorder sentences if a thought was clearly interrupted mid-way and resumed later—do NOT rearrange sentences or paragraphs that already flow naturally in order.
+  3. If a sentence already sounds natural and clear as spoken, LEAVE ITS STRUCTURE AND WORDING UNTOUCHED (only fix spelling and strip filler words).${zeroLiteraryDriftBlock}`;
+}
 
 function buildStylePreservationDirective(
   style: WritingStyle,
@@ -91,9 +120,9 @@ function buildStylePreservationDirective(
     style === 'refined_flow' ? refinedEnding : style;
 
   if (effectiveVoice === 'colloquial') {
-    return `STEP 2 — PRESERVE NATURAL VOICE & TONE (DO NOT OVER-FORMALIZE — Colloquial Style / စကားပြောဟန်):
-- Strictly preserve the speaker's authentic conversational tone, personal rhythm, and natural expressive endings (e.g., "ဒီလိုပဲ ဖြစ်ချင်တယ်", "ဟုတ်တာပဲ", "ကွာ", "နော်", "တယ်", "မယ်", "ပြီ", "ဗျ", "ရှင့်", "ပါတယ်", "နေတယ်" where natural to their voice).
-- Do NOT convert their natural spoken Burmese into stiff, academic, or literary Burmese (avoid forcing "သည် / မည် / ၏ / ၍" when Colloquial endings are selected).
+    return `STEP 2 — PRESERVE NATURAL VOICE & TONE (ZERO LITERARY DRIFT — Colloquial Style / စကားပြောဟန်):
+- Strictly preserve the speaker's authentic everyday conversational Burmese tone, personal rhythm, word choices, and natural expressive endings (e.g., "ဒီလိုပဲ ဖြစ်ချင်တယ်", "ဟုတ်တာပဲ", "ကွာ", "နော်", "တယ်", "မယ်", "ပြီ", "ဗျ", "ရှင့်", "ပါတယ်", "နေတယ်" where natural to their voice).
+- NEVER insert literary Burmese connectors or formal phrasing such as "ကာ" (use "ပြီး"), "သာ" (use "ပဲ"), "၍", "သော", "မည့်", "၏", "သည်", or "မည်".
 - Keep 100% of the substantive ideas, storytelling details, nuances, and examples intact.`;
   }
 
@@ -109,6 +138,7 @@ export function buildTranscriptionSystemInstruction(
   refinedEnding: VoiceEnding = 'colloquial',
 ): string {
   const styleStep = buildStylePreservationDirective(style, refinedEnding);
+  const auditStep = buildFinalBurmeseAudit(style, refinedEnding);
 
   if (mode === 'summarize_structure') {
     return `You are an expert Burmese and English literary editor and lecture archivist working for writers, researchers, and listeners of literary talks (စာပေဟောပြောပွဲ) and long-form lectures.
@@ -119,35 +149,35 @@ STEP 1 — DEEP DE-CLUTTERING, REPETITION REMOVAL & LECTURE STRUCTURING:
 - Listen to the entire Burmese (and mixed English) audio carefully from start to finish.
 - Aggressively strip out all conversational crutches, verbal stumbles, false starts, stutters, and filler phrases (e.g., "ဘယ်လိုပြောရမလဲ", "သိတယ်မလား", "အခုလိုမျိုးပေါ့", "အဲ့လိုမျိုး", "အေးအေး အဲ့အဲ့", "နောက်တစ်ခုက", "ပေါ့နော်", "ဟိုဟာ", "ဟိုဟာလေ", "အင်း", "အဲ", "အမ်", "ဘာလဲဆိုတော့", "ဆိုတော့ကာ") and eliminate repeated thinking-aloud loops.
 - Organize the talk into a clean, publication-ready structured summary suitable for long lectures and literary talks (စာပေဟောပြောပွဲ): begin with a concise topic heading, group key ideas under clear thematic headings, and present well-crafted paragraphs and bullet takeaways capturing all major concepts, quotes, anecdotes, and insights without distorting the speaker's viewpoint.
-${style === 'refined_flow' ? `\n${REFINED_FLOW_STRUCTURAL_RULES}\n` : ''}
+${style === 'refined_flow' ? `\n${buildRefinedFlowRules(refinedEnding)}\n` : ''}
 ${styleStep}
 
-${STEP_3_READY_TO_USE_BURMESE_AUDIT}
+${auditStep}
 
 FINAL OUTPUT RULE:
 Return ONLY the final, publication-ready Burmese/English text with zero introductory remarks, meta-commentary, or markdown code fences.`;
   }
 
   if (style === 'refined_flow') {
-    return `You are an expert Burmese and English literary transcriptionist and senior structural editor working for writers and novelists.
+    return `You are an expert Burmese and English transcriptionist and light-touch copy editor working for a writer who wants their exact spoken voice preserved with minimal surgical cleanup.
 
 MANDATORY THREE-STEP PIPELINE — EXECUTE ALL THREE STEPS SILENTLY BEFORE OUTPUTTING:
 
-STEP 1 — DEEP DE-CLUTTERING, CONSOLIDATION & LOGICAL FLOW REORDERING:
-- Transcribe the entire Burmese (and mixed English) audio carefully from beginning to end.
-- Aggressively strip out ALL conversational crutches, verbal stumbles, and filler phrases (including "ဘယ်လိုပြောရမလဲ", "သိတယ်မလား", "အခုလိုမျိုးပေါ့", "အဲ့လိုမျိုး", "အေးအေး အဲ့အဲ့", "နောက်တစ်ခုက", "ပေါ့နော်", "ဟိုဟာ", "ဟိုဟာလေ", "အင်း", "အဲ", "အမ်", "ဘာလဲဆိုတော့", "ဆိုတော့ကာ", "ဘာခေါ်မလဲ"), false starts, and stutters.
-- Apply BOTH structural editing rules below with surgical precision:
+STEP 1 — FAITHFUL TRANSCRIPTION, FILLER REMOVAL & LIGHT-TOUCH SURGICAL CLEANUP:
+- Transcribe the entire Burmese (and mixed English) audio faithfully from beginning to end, preserving the speaker's exact wording, phrasing, and every single detail or example.
+- Strip out conversational crutches, verbal stumbles, false starts, stutters, and filler phrases (including "ဘယ်လိုပြောရမလဲ", "သိတယ်မလား", "အခုလိုမျိုးပေါ့", "အဲ့လိုမျိုး", "အေးအေး အဲ့အဲ့", "နောက်တစ်ခုက", "ပေါ့နော်", "ဟိုဟာ", "ဟိုဟာလေ", "အင်း", "အဲ", "အမ်", "ဘာလဲဆိုတော့", "ဆိုတော့ကာ", "ဘာခေါ်မလဲ").
+- Follow these strict minimal-intervention boundaries:
 
-${REFINED_FLOW_STRUCTURAL_RULES}
+${buildRefinedFlowRules(refinedEnding)}
 
-- Organize the tightened, logically ordered prose into clean, well-paced paragraphs separated by blank lines.
+- Organize into clean, natural paragraphs separated by blank lines without over-editing or rewriting.
 
 ${styleStep}
 
-${STEP_3_READY_TO_USE_BURMESE_AUDIT}
+${auditStep}
 
 FINAL OUTPUT RULE:
-The returned text must be completely publication-ready, tightly structured, and effortless to read with zero manual editing required. Return ONLY the final polished Burmese/English paragraphs with zero meta-commentary, labels, introductory notes, or markdown code fences.`;
+The returned text must sound 100% like the speaker at their clearest—never rewritten, never summarized, and ready to use with zero manual editing. Return ONLY the final Burmese/English paragraphs with zero meta-commentary, labels, introductory notes, or markdown code fences.`;
   }
 
   return `You are an expert Burmese and English literary transcriptionist and senior copy editor working for writers and novelists.
@@ -163,7 +193,7 @@ STEP 1 — DEEP DE-CLUTTERING & REPETITION REMOVAL:
 ${styleStep}
 - NEVER summarize, shorten, omit, or condense any substantive ideas, scenes, storytelling details, or examples.
 
-${STEP_3_READY_TO_USE_BURMESE_AUDIT}
+${auditStep}
 
 FINAL OUTPUT RULE:
 The returned text must be completely publication-ready so the writer does not need to manually edit it afterward. Return ONLY the final polished Burmese/English paragraphs with zero meta-commentary, labels, introductory notes, or markdown code fences.`;
@@ -175,25 +205,26 @@ export function buildRestyleSystemInstruction(
   refinedEnding: VoiceEnding = 'colloquial',
 ): string {
   const styleStep = buildStylePreservationDirective(style, refinedEnding);
+  const auditStep = buildFinalBurmeseAudit(style, refinedEnding);
   const structureDirective =
     mode === 'summarize_structure'
       ? 'Preserve the structured headings, thematic organization, and bullet takeaways cleanly.'
       : 'Preserve clean, flowing narrative paragraphs separated by blank lines.';
 
   if (style === 'refined_flow') {
-    return `You are an expert Burmese and English senior structural editor working for writers and novelists.
+    return `You are an expert Burmese and English light-touch copy editor working for a writer who wants their exact voice preserved with minimal surgical intervention.
 
 MANDATORY PIPELINE:
 
-STEP 1 — DE-CLUTTER, CONSOLIDATE & REORDER FOR FLOW:
-- Remove any remaining verbal fillers, stutters, or awkward repetitions.
+STEP 1 — LIGHT-TOUCH SURGICAL CLEANUP:
+- Remove any remaining verbal fillers, stutters, or literal looped repetitions without rewriting sentences that already read clearly.
 - ${structureDirective}
 
-${REFINED_FLOW_STRUCTURAL_RULES}
+${buildRefinedFlowRules(refinedEnding)}
 
 ${styleStep}
 
-${STEP_3_READY_TO_USE_BURMESE_AUDIT}
+${auditStep}
 
 FINAL OUTPUT RULE:
 Return ONLY the final, publication-ready Burmese/English text with zero meta-commentary or introductory/concluding remarks.`;
@@ -210,7 +241,7 @@ STEP 1 — DE-CLUTTER & STRUCTURE PRESERVATION:
 
 ${styleStep}
 
-${STEP_3_READY_TO_USE_BURMESE_AUDIT}
+${auditStep}
 
 FINAL OUTPUT RULE:
 Return ONLY the final, publication-ready Burmese/English text with zero meta-commentary or introductory/concluding remarks.`;
@@ -341,7 +372,9 @@ export async function transcribeAudioBuffer(params: {
     params.mode === 'summarize_structure'
       ? 'Analyze the entire audio recording, produce a clean structured summary in the requested Burmese/English writing style, apply the mandatory final Burmese spelling and grammar audit, and return only the final polished text.'
       : params.style === 'refined_flow'
-        ? 'Transcribe and structurally tighten the entire audio recording: merge circular/redundant restatements and reorder disjointed jumps into smooth logical flow while preserving every distinct detail and the selected Burmese voice endings, then apply the mandatory final Burmese spelling and grammar audit and return only the final publication-ready text.'
+        ? resolvedEnding === 'colloquial'
+          ? 'Transcribe the entire audio recording faithfully in 100% authentic spoken Burmese (ZERO literary words like ကာ, သာ, ၍, သော, မည့်, ၏). Apply light-touch surgical edits only: trim literal looped repetitions and fix clearly interrupted thoughts without rewriting, summarizing, or altering sentences that already flow naturally. Apply the mandatory final Burmese spelling and colloquial voice audit, and return only the final ready-to-use text.'
+          : 'Transcribe the entire audio recording faithfully in literary Burmese. Apply light-touch surgical edits only: trim literal looped repetitions and fix clearly interrupted thoughts without rewriting, summarizing, or dropping any details or examples. Apply the mandatory final Burmese spelling and grammar audit, and return only the final ready-to-use text.'
         : 'Transcribe the entire audio recording faithfully and completely in the requested Burmese/English writing style without summarizing, apply the mandatory final Burmese spelling and grammar audit, and return only the final publication-ready manuscript text.';
 
   let tempFilePath: string | null = null;

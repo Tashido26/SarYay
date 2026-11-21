@@ -14,12 +14,18 @@ import type {
   GeminiModel,
   ManuscriptSection,
   ProcessingMode,
+  SectionVersion,
   StagedAudio,
   StorySession,
   VoiceEnding,
   WritingStyle,
 } from './types.ts';
-import { formatStyleWithEnding } from './types.ts';
+import {
+  formatCompactStyleLabel,
+  getActiveSectionVersion,
+  getActiveVersionIndex,
+  getSectionVersions,
+} from './types.ts';
 import { deleteAudioClip, deleteAudioClips, getAudioClip, saveAudioClip } from './lib/audioDb.ts';
 import { restyleTextApi, transcribeAudioApi } from './lib/api.ts';
 import {
@@ -218,15 +224,27 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     await saveAudioClip(audioId, staged.blob, audioMeta);
 
     const now = new Date().toISOString();
-    const newSection: ManuscriptSection = {
-      id: createId('sec'),
-      content: result.text,
+    const initialVersion: SectionVersion = {
+      id: createId('ver'),
+      text: result.text,
       style: targetStyle,
       refinedEnding: targetStyle === 'refined_flow' ? targetEnding : undefined,
       model: targetModel,
       mode,
+      timestamp: now,
+    };
+
+    const newSection: ManuscriptSection = {
+      id: createId('sec'),
+      content: initialVersion.text,
+      style: initialVersion.style,
+      refinedEnding: initialVersion.refinedEnding,
+      model: initialVersion.model,
+      mode,
       audioId,
       audioMeta,
+      versions: [initialVersion],
+      activeVersionIndex: 0,
       createdAt: now,
       updatedAt: now,
     };
@@ -236,7 +254,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       sections: [...session.sections, newSection],
     }));
 
-    const styleDesc = formatStyleWithEnding(targetStyle, targetEnding);
+    const styleDesc = formatCompactStyleLabel(targetStyle, targetEnding);
     showToast(
       mode === 'summarize_structure'
         ? `Structured summary added (${styleDesc})`
@@ -248,9 +266,43 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     const now = new Date().toISOString();
     updateActiveSession((session) => ({
       ...session,
-      sections: session.sections.map((sec) =>
-        sec.id === sectionId ? { ...sec, content: nextContent, updatedAt: now } : sec,
-      ),
+      sections: session.sections.map((sec) => {
+        if (sec.id !== sectionId) return sec;
+        const versions = getSectionVersions(sec);
+        const activeIdx = getActiveVersionIndex(sec);
+        const updatedVersions = versions.map((v, idx) =>
+          idx === activeIdx ? { ...v, text: nextContent, timestamp: now } : v,
+        );
+        return {
+          ...sec,
+          content: nextContent,
+          versions: updatedVersions,
+          activeVersionIndex: activeIdx,
+          updatedAt: now,
+        };
+      }),
+    }));
+  };
+
+  const handleSelectSectionVersion = (sectionId: string, versionIndex: number) => {
+    updateActiveSession((session) => ({
+      ...session,
+      sections: session.sections.map((sec) => {
+        if (sec.id !== sectionId) return sec;
+        const versions = getSectionVersions(sec);
+        const clamped = Math.max(0, Math.min(versionIndex, versions.length - 1));
+        const selected = versions[clamped];
+        return {
+          ...sec,
+          content: selected.text,
+          style: selected.style,
+          refinedEnding: selected.refinedEnding,
+          model: selected.model,
+          versions,
+          activeVersionIndex: clamped,
+          updatedAt: selected.timestamp,
+        };
+      }),
     }));
   };
 
@@ -265,6 +317,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     const chosenModel = activeSession.defaultModel;
     const sectionMode: ProcessingMode = section.mode ?? 'full_polish';
     const resolvedEnding: VoiceEnding = targetEnding ?? activeRefinedEnding;
+    const currentActiveText = getActiveSectionVersion(section).text;
 
     try {
       let nextText = '';
@@ -288,7 +341,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
 
       if (!usedAudio) {
         const result = await restyleTextApi({
-          text: section.content,
+          text: currentActiveText,
           style: targetStyle,
           refinedEnding: resolvedEnding,
           model: chosenModel,
@@ -298,28 +351,38 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       }
 
       const now = new Date().toISOString();
+      const nextVersion: SectionVersion = {
+        id: createId('ver'),
+        text: nextText,
+        style: targetStyle,
+        refinedEnding: targetStyle === 'refined_flow' ? resolvedEnding : undefined,
+        model: chosenModel,
+        mode: sectionMode,
+        timestamp: now,
+      };
+
+      const nextVersionNumber = getSectionVersions(section).length + 1;
       updateActiveSession((session) => ({
         ...session,
-        sections: session.sections.map((sec) =>
-          sec.id === section.id
-            ? {
-                ...sec,
-                content: nextText,
-                style: targetStyle,
-                refinedEnding: targetStyle === 'refined_flow' ? resolvedEnding : undefined,
-                model: chosenModel,
-                updatedAt: now,
-              }
-            : sec,
-        ),
+        sections: session.sections.map((sec) => {
+          if (sec.id !== section.id) return sec;
+          const existingVersions = getSectionVersions(sec);
+          const nextVersions = [...existingVersions, nextVersion];
+          return {
+            ...sec,
+            content: nextVersion.text,
+            style: nextVersion.style,
+            refinedEnding: nextVersion.refinedEnding,
+            model: nextVersion.model,
+            versions: nextVersions,
+            activeVersionIndex: nextVersions.length - 1,
+            updatedAt: now,
+          };
+        }),
       }));
 
-      const styleDesc = formatStyleWithEnding(targetStyle, resolvedEnding);
-      showToast(
-        usedAudio
-          ? `Re-transcribed from audio in ${styleDesc}`
-          : `Converted to ${styleDesc}`,
-      );
+      const styleDesc = formatCompactStyleLabel(targetStyle, resolvedEnding);
+      showToast(`Saved as v${nextVersionNumber} (${styleDesc})`);
     } catch (err) {
       const msg =
         err instanceof Error ? err.message : 'Could not re-process this section. Please try again.';
@@ -389,11 +452,17 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   );
 
   const totalCharacters = useMemo(
-    () => orderedSections.reduce((acc, s) => acc + countCharacters(s.content), 0),
+    () =>
+      orderedSections.reduce(
+        (acc, s) => acc + countCharacters(getActiveSectionVersion(s).text),
+        0,
+      ),
     [orderedSections],
   );
 
-  const hasContent = orderedSections.some((s) => s.content.trim().length > 0);
+  const hasContent = orderedSections.some(
+    (s) => getActiveSectionVersion(s).text.trim().length > 0,
+  );
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-white text-[#111827]">
@@ -587,6 +656,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                     activeModel={activeSession.defaultModel}
                     isReprocessing={reprocessingSectionId === section.id}
                     onUpdateContent={handleUpdateSectionContent}
+                    onSelectVersion={handleSelectSectionVersion}
                     onReprocessStyle={handleReprocessStyle}
                     onDeleteSection={handleDeleteSection}
                     onCopyText={(txt) => copyToClipboard(txt, 'Section copied')}
