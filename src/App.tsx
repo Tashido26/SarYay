@@ -9,7 +9,6 @@ import {
   FileDown,
   FileText,
   Loader2,
-  LogOut,
   PanelLeft,
   X,
 } from 'lucide-react';
@@ -1173,20 +1172,6 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                   <span className="sm:hidden">.md</span>
                 </button>
               </>
-            )}
-
-            {!sidebarOpen && (
-              <button
-                type="button"
-                onClick={() => {
-                  onSignOut().catch(() => undefined);
-                }}
-                title={`Sign out (${user.email ?? 'Account'})`}
-                className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-2.5 py-1.5 text-xs font-medium text-[#6B7280] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA]"
-              >
-                <LogOut className="h-3.5 w-3.5" />
-                <span className="hidden md:inline">Sign Out</span>
-              </button>
             )}
           </div>
         </header>
