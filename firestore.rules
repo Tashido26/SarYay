@@ -25,7 +25,7 @@ service cloud.firestore {
       return id is string
         && id.size() >= 1
         && id.size() <= 128
-        && id.matches('^[a-zA-Z0-9_\\-]+$');
+        && id.matches('^[a-zA-Z0-9_-]+$');
     }
 
     // Strict verified-email whitelist + UID path ownership gate
@@ -75,14 +75,14 @@ service cloud.firestore {
 
     function isValidVersionItem(v) {
       return v is map
-        && v.keys().hasAll(['id', 'text', 'style', 'refinedEnding', 'model', 'mode', 'timestamp'])
+        && v.keys().hasAll(['id', 'text', 'style', 'model', 'timestamp'])
         && v.keys().hasOnly(['id', 'text', 'style', 'refinedEnding', 'model', 'mode', 'timestamp', 'usage'])
         && isValidId(v.id)
         && v.text is string && v.text.size() <= 200000
         && isValidStyle(v.style)
-        && isValidEnding(v.refinedEnding)
+        && (!('refinedEnding' in v) || isValidEnding(v.refinedEnding))
         && isValidModel(v.model)
-        && isValidMode(v.mode)
+        && (!('mode' in v) || isValidMode(v.mode))
         && v.timestamp is string && v.timestamp.size() >= 1 && v.timestamp.size() <= 64
         && (!('usage' in v) || isValidUsage(v.usage));
     }
@@ -95,9 +95,6 @@ service cloud.firestore {
           'ownerId',
           'title',
           'defaultStyle',
-          'defaultRefinedEnding',
-          'defaultModel',
-          'sectionCount',
           'createdAt',
           'updatedAt'
         ])
@@ -119,9 +116,9 @@ service cloud.firestore {
         && data.ownerId == userId
         && data.title is string && data.title.size() >= 1 && data.title.size() <= 300
         && isValidStyle(data.defaultStyle)
-        && isValidEnding(data.defaultRefinedEnding)
-        && isValidModel(data.defaultModel)
-        && data.sectionCount is int && data.sectionCount >= 0 && data.sectionCount <= 5000
+        && (!('defaultRefinedEnding' in data) || isValidEnding(data.defaultRefinedEnding))
+        && (!('defaultModel' in data) || isValidModel(data.defaultModel))
+        && (!('sectionCount' in data) || (data.sectionCount is number && data.sectionCount >= 0 && data.sectionCount <= 5000))
         && (!('glossary' in data) || (data.glossary is string && data.glossary.size() <= 8000))
         && (!('isDeleted' in data) || data.isDeleted is bool)
         && (!('deletedAt' in data) || data.deletedAt == null || data.deletedAt is timestamp)
@@ -136,13 +133,9 @@ service cloud.firestore {
           'order',
           'content',
           'style',
-          'refinedEnding',
           'model',
-          'mode',
           'versions',
           'activeVersionIndex',
-          'audioUrl',
-          'storagePath',
           'createdAt',
           'updatedAt'
         ])
@@ -176,9 +169,9 @@ service cloud.firestore {
         && data.order is number && data.order >= 0
         && data.content is string && data.content.size() <= 200000
         && isValidStyle(data.style)
-        && isValidEnding(data.refinedEnding)
+        && (!('refinedEnding' in data) || isValidEnding(data.refinedEnding))
         && isValidModel(data.model)
-        && isValidMode(data.mode)
+        && (!('mode' in data) || isValidMode(data.mode))
         && data.versions is list
         && data.versions.size() >= 1
         && data.versions.size() <= 50
@@ -187,8 +180,8 @@ service cloud.firestore {
         && data.activeVersionIndex < data.versions.size()
         && isValidVersionItem(data.versions[0])
         && isValidVersionItem(data.versions[data.activeVersionIndex])
-        && data.audioUrl is string && data.audioUrl.size() <= 2048
-        && data.storagePath is string && data.storagePath.size() <= 512
+        && (!('audioUrl' in data) || (data.audioUrl is string && data.audioUrl.size() <= 2048))
+        && (!('storagePath' in data) || (data.storagePath is string && data.storagePath.size() <= 512))
         && (!('audioId' in data) || (data.audioId is string && data.audioId.size() <= 128))
         && (!('audioMeta' in data) || isValidAudioMeta(data.audioMeta))
         && (!('isDeleted' in data) || data.isDeleted is bool)
@@ -207,13 +200,9 @@ service cloud.firestore {
           'order',
           'content',
           'style',
-          'refinedEnding',
           'model',
-          'mode',
           'versions',
           'activeVersionIndex',
-          'audioUrl',
-          'storagePath',
           'isDeleted',
           'deletedAt',
           'createdAt',
@@ -248,9 +237,9 @@ service cloud.firestore {
         && data.order is number && data.order >= 0
         && data.content is string && data.content.size() <= 200000
         && isValidStyle(data.style)
-        && isValidEnding(data.refinedEnding)
+        && (!('refinedEnding' in data) || isValidEnding(data.refinedEnding))
         && isValidModel(data.model)
-        && isValidMode(data.mode)
+        && (!('mode' in data) || isValidMode(data.mode))
         && data.versions is list
         && data.versions.size() >= 1
         && data.versions.size() <= 50
@@ -259,8 +248,8 @@ service cloud.firestore {
         && data.activeVersionIndex < data.versions.size()
         && isValidVersionItem(data.versions[0])
         && isValidVersionItem(data.versions[data.activeVersionIndex])
-        && data.audioUrl is string && data.audioUrl.size() <= 2048
-        && data.storagePath is string && data.storagePath.size() <= 512
+        && (!('audioUrl' in data) || (data.audioUrl is string && data.audioUrl.size() <= 2048))
+        && (!('storagePath' in data) || (data.storagePath is string && data.storagePath.size() <= 512))
         && (!('audioId' in data) || (data.audioId is string && data.audioId.size() <= 128))
         && (!('audioMeta' in data) || isValidAudioMeta(data.audioMeta))
         && data.isDeleted == true
