@@ -3,9 +3,12 @@ import type { User } from 'firebase/auth';
 import {
   AlertCircle,
   Check,
+  Cloud,
+  CloudUpload,
   Copy,
   FileDown,
   FileText,
+  Loader2,
   LogOut,
   PanelLeft,
   X,
@@ -26,8 +29,26 @@ import {
   getActiveVersionIndex,
   getSectionVersions,
 } from './types.ts';
-import { deleteAudioClip, deleteAudioClips, getAudioClip, saveAudioClip } from './lib/audioDb.ts';
+import { deleteAudioClip, getAudioClip, saveAudioClip } from './lib/audioDb.ts';
 import { restyleTextApi, transcribeAudioApi } from './lib/api.ts';
+import {
+  appendSectionVersionInCloud,
+  createSectionInCloud,
+  createStoryInCloud,
+  deleteSectionInCloud,
+  deleteStoryInCloud,
+  downloadSectionAudioBlob,
+  formatCloudErrorMessage,
+  renameStoryInCloud,
+  selectSectionVersionInCloud,
+  subscribeToSections,
+  subscribeToStories,
+  updateSectionContentInCloud,
+  updateStoryModelInCloud,
+  updateStoryRefinedEndingInCloud,
+  updateStoryStyleInCloud,
+  uploadSectionAudio,
+} from './lib/cloudStore.ts';
 import {
   compileFullStoryMarkdown,
   compileFullStoryPlainText,
@@ -38,18 +59,18 @@ import {
 } from './lib/format.ts';
 import {
   createId,
-  createNewSession,
   loadActiveSessionId,
-  loadSessions,
   loadSidebarOpen,
   saveActiveSessionId,
-  saveSessions,
   saveSidebarOpen,
 } from './lib/storage.ts';
 import { Sidebar } from './components/Sidebar.tsx';
 import { DictationDock } from './components/DictationDock.tsx';
 import { SectionBlock } from './components/SectionBlock.tsx';
 import { AuthGate } from './components/AuthGate.tsx';
+
+const LEGACY_SESSIONS_KEY = 'sarpay_studio_sessions_v1';
+const MIGRATED_FLAG_KEY = 'sarpay_studio_cloud_migrated_v1';
 
 export default function App() {
   return (
@@ -65,12 +86,14 @@ interface StudioWorkspaceProps {
 }
 
 function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
-  const [sessions, setSessions] = useState<StorySession[]>(() => loadSessions());
-  const [activeSessionId, setActiveSessionId] = useState<string>(() => {
-    const initial = loadSessions();
-    const savedId = loadActiveSessionId(initial[0].id);
-    return initial.some((s) => s.id === savedId) ? savedId : initial[0].id;
-  });
+  const uid = user.uid;
+
+  const [stories, setStories] = useState<StorySession[]>([]);
+  const [storiesLoaded, setStoriesLoaded] = useState(false);
+  const [activeSessionId, setActiveSessionId] = useState<string>(() => loadActiveSessionId(''));
+  const [sections, setSections] = useState<ManuscriptSection[]>([]);
+  const [sectionsLoaded, setSectionsLoaded] = useState(false);
+
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(() => {
     if (typeof window !== 'undefined' && window.innerWidth < 1024) {
       return false;
@@ -78,12 +101,25 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     return loadSidebarOpen();
   });
 
+  // Instant local editing buffers (debounced to Firestore)
+  const [titleDraft, setTitleDraft] = useState<string>('');
+  const titleDirtyRef = useRef<boolean>(false);
+  const titleDebounceRef = useRef<number | null>(null);
+
+  const [sectionDrafts, setSectionDrafts] = useState<Record<string, string>>({});
+  const sectionDraftsRef = useRef<Record<string, string>>({});
+  const sectionDebounceRefs = useRef<Record<string, number>>({});
+  const sectionsRef = useRef<ManuscriptSection[]>([]);
+
+  const [pendingSyncOps, setPendingSyncOps] = useState(0);
+  const [isUploadingAudio, setIsUploadingAudio] = useState(false);
   const [reprocessingSectionId, setReprocessingSectionId] = useState<string | null>(null);
   const [globalError, setGlobalError] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [copiedFull, setCopiedFull] = useState(false);
 
   const toastTimeoutRef = useRef<number | null>(null);
+  const bootstrappedRef = useRef<boolean>(false);
 
   const showToast = useCallback((message: string) => {
     setToastMessage(message);
@@ -92,15 +128,31 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     }
     toastTimeoutRef.current = window.setTimeout(() => {
       setToastMessage(null);
-    }, 2600);
+    }, 2800);
   }, []);
 
+  const trackSync = useCallback(async <T,>(task: () => Promise<T>): Promise<T> => {
+    setPendingSyncOps((c) => c + 1);
+    try {
+      return await task();
+    } finally {
+      setPendingSyncOps((c) => Math.max(0, c - 1));
+    }
+  }, []);
+
+  // Keep refs updated
   useEffect(() => {
-    saveSessions(sessions);
-  }, [sessions]);
+    sectionsRef.current = sections;
+  }, [sections]);
 
   useEffect(() => {
-    saveActiveSessionId(activeSessionId);
+    sectionDraftsRef.current = sectionDrafts;
+  }, [sectionDrafts]);
+
+  useEffect(() => {
+    if (activeSessionId) {
+      saveActiveSessionId(activeSessionId);
+    }
   }, [activeSessionId]);
 
   useEffect(() => {
@@ -114,94 +166,342 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       if (toastTimeoutRef.current !== null) {
         window.clearTimeout(toastTimeoutRef.current);
       }
+      if (titleDebounceRef.current !== null) {
+        window.clearTimeout(titleDebounceRef.current);
+      }
+      for (const timerId of Object.values(sectionDebounceRefs.current)) {
+        window.clearTimeout(timerId);
+      }
     };
   }, []);
 
-  const activeSession = useMemo(
-    () => sessions.find((s) => s.id === activeSessionId) ?? sessions[0],
-    [sessions, activeSessionId],
-  );
+  // Real-time Firestore listener for all stories under users/{uid}/stories
+  useEffect(() => {
+    bootstrappedRef.current = false;
+    setStoriesLoaded(false);
 
-  const updateActiveSession = useCallback(
-    (updater: (session: StorySession) => StorySession) => {
-      setSessions((prev) =>
-        prev.map((session) =>
-          session.id === activeSession.id
-            ? { ...updater(session), updatedAt: new Date().toISOString() }
-            : session,
-        ),
-      );
-    },
-    [activeSession.id],
-  );
+    const unsubscribe = subscribeToStories(
+      uid,
+      async (cloudStories) => {
+        setStories(cloudStories);
+        setStoriesLoaded(true);
 
-  const handleCreateSession = () => {
-    const next = createNewSession(
-      activeSession.defaultStyle,
-      activeSession.defaultModel,
-      'Untitled Story',
+        if (cloudStories.length === 0 && !bootstrappedRef.current) {
+          bootstrappedRef.current = true;
+          try {
+            await trackSync(async () => {
+              // One-time import of existing localStorage stories if present and not yet migrated
+              let imported = false;
+              try {
+                const alreadyMigrated = localStorage.getItem(MIGRATED_FLAG_KEY) === 'true';
+                const legacyRaw = localStorage.getItem(LEGACY_SESSIONS_KEY);
+                if (!alreadyMigrated && legacyRaw) {
+                  const legacyParsed = JSON.parse(legacyRaw) as StorySession[];
+                  const meaningful = Array.isArray(legacyParsed)
+                    ? legacyParsed.filter(
+                        (s) =>
+                          (Array.isArray(s.sections) && s.sections.length > 0) ||
+                          (s.title && s.title.trim() && s.title.trim() !== 'Untitled Story'),
+                      )
+                    : [];
+
+                  if (meaningful.length > 0) {
+                    for (const legacyStory of meaningful) {
+                      const newStoryId = createId('story');
+                      await createStoryInCloud(uid, {
+                        storyId: newStoryId,
+                        title: legacyStory.title || 'Untitled Story',
+                        defaultStyle: legacyStory.defaultStyle || 'colloquial',
+                        defaultRefinedEnding: legacyStory.defaultRefinedEnding || 'colloquial',
+                        defaultModel: legacyStory.defaultModel || 'gemini-2.5-flash',
+                      });
+
+                      const legacySections = sortSectionsChronologically(legacyStory.sections || []);
+                      let secCount = 0;
+                      for (let i = 0; i < legacySections.length; i++) {
+                        const sec = legacySections[i];
+                        const secId = createId('sec');
+                        const versions = getSectionVersions(sec);
+                        const initialVersion = versions[0];
+                        secCount += 1;
+                        await createSectionInCloud(uid, newStoryId, {
+                          sectionId: secId,
+                          order: Date.parse(sec.createdAt) || Date.now() + i,
+                          initialVersion,
+                          audioId: sec.audioId,
+                          audioMeta: sec.audioMeta,
+                          nextSectionCount: secCount,
+                        });
+                        if (versions.length > 1) {
+                          await appendSectionVersionInCloud(uid, newStoryId, secId, versions);
+                        }
+                      }
+                    }
+                    localStorage.setItem(MIGRATED_FLAG_KEY, 'true');
+                    imported = true;
+                    showToast('Imported local stories to Firebase Cloud');
+                  }
+                }
+              } catch {
+                // Ignore legacy migration errors and fall back to fresh story
+              }
+
+              if (!imported) {
+                const freshId = createId('story');
+                await createStoryInCloud(uid, {
+                  storyId: freshId,
+                  title: 'Untitled Story',
+                  defaultStyle: 'colloquial',
+                  defaultRefinedEnding: 'colloquial',
+                  defaultModel: 'gemini-2.5-flash',
+                });
+                setActiveSessionId(freshId);
+              }
+            });
+          } catch (err) {
+            setGlobalError(formatCloudErrorMessage(err));
+          }
+          return;
+        }
+
+        if (cloudStories.length > 0) {
+          setActiveSessionId((prevId) => {
+            if (prevId && cloudStories.some((s) => s.id === prevId)) {
+              return prevId;
+            }
+            return cloudStories[0].id;
+          });
+        }
+      },
+      (err) => {
+        setStoriesLoaded(true);
+        setGlobalError(formatCloudErrorMessage(err));
+      },
     );
-    setSessions((prev) => [next, ...prev]);
-    setActiveSessionId(next.id);
-    setGlobalError(null);
-  };
 
-  const handleRenameSession = (id: string, title: string) => {
-    setSessions((prev) =>
-      prev.map((s) =>
-        s.id === id ? { ...s, title, updatedAt: new Date().toISOString() } : s,
-      ),
-    );
-  };
+    return () => unsubscribe();
+  }, [uid, showToast, trackSync]);
 
-  const handleDeleteSession = (id: string) => {
-    const target = sessions.find((s) => s.id === id);
-    if (target) {
-      const audioIds = target.sections
-        .map((sec) => sec.audioId)
-        .filter((aid): aid is string => Boolean(aid));
-      deleteAudioClips(audioIds).catch(() => undefined);
+  // Real-time Firestore listener for active story's sections
+  useEffect(() => {
+    if (!activeSessionId) {
+      setSections([]);
+      setSectionsLoaded(true);
+      return;
     }
 
-    setSessions((prev) => {
-      const remaining = prev.filter((s) => s.id !== id);
-      if (remaining.length === 0) {
-        const fresh = createNewSession();
-        setActiveSessionId(fresh.id);
-        return [fresh];
-      }
-      if (id === activeSessionId) {
-        setActiveSessionId(remaining[0].id);
-      }
-      return remaining;
+    setSectionsLoaded(false);
+    // Clear stale local drafts when switching stories
+    for (const timerId of Object.values(sectionDebounceRefs.current)) {
+      window.clearTimeout(timerId);
+    }
+    sectionDebounceRefs.current = {};
+    setSectionDrafts({});
+
+    const unsubscribe = subscribeToSections(
+      uid,
+      activeSessionId,
+      (cloudSections) => {
+        setSections(cloudSections);
+        setSectionsLoaded(true);
+      },
+      (err) => {
+        setSectionsLoaded(true);
+        setGlobalError(formatCloudErrorMessage(err));
+      },
+    );
+
+    return () => unsubscribe();
+  }, [uid, activeSessionId]);
+
+  const activeSession = useMemo(
+    () => stories.find((s) => s.id === activeSessionId) ?? stories[0] ?? null,
+    [stories, activeSessionId],
+  );
+
+  // Sync local title input with remote Firestore title when not actively editing
+  useEffect(() => {
+    if (!activeSession) return;
+    if (!titleDirtyRef.current) {
+      setTitleDraft(activeSession.title);
+    }
+  }, [activeSession?.id, activeSession?.title]);
+
+  // Merge any in-flight local typing drafts into displayed sections
+  const orderedSections = useMemo(() => {
+    const sorted = sortSectionsChronologically(sections);
+    return sorted.map((sec) => {
+      const draft = sectionDrafts[sec.id];
+      if (draft === undefined) return sec;
+      const versions = getSectionVersions(sec);
+      const activeIdx = getActiveVersionIndex(sec);
+      const updatedVersions = versions.map((v, idx) =>
+        idx === activeIdx ? { ...v, text: draft } : v,
+      );
+      return {
+        ...sec,
+        content: draft,
+        versions: updatedVersions,
+        activeVersionIndex: activeIdx,
+      };
     });
-    showToast('Story deleted');
+  }, [sections, sectionDrafts]);
+
+  const flushSectionDraft = useCallback(
+    async (sectionId: string) => {
+      const pendingTimer = sectionDebounceRefs.current[sectionId];
+      if (pendingTimer !== undefined) {
+        window.clearTimeout(pendingTimer);
+        delete sectionDebounceRefs.current[sectionId];
+      }
+
+      const draftText = sectionDraftsRef.current[sectionId];
+      if (draftText === undefined || !activeSessionId) return;
+
+      const targetSection = sectionsRef.current.find((s) => s.id === sectionId);
+      if (!targetSection) return;
+
+      const now = new Date().toISOString();
+      const versions = getSectionVersions(targetSection);
+      const activeIdx = getActiveVersionIndex(targetSection);
+      const updatedVersions = versions.map((v, idx) =>
+        idx === activeIdx ? { ...v, text: draftText, timestamp: now } : v,
+      );
+
+      // Clear draft buffer once write starts (optimistically keep latest in Firestore snapshot)
+      setSectionDrafts((prev) => {
+        if (prev[sectionId] !== draftText) return prev;
+        const copy = { ...prev };
+        delete copy[sectionId];
+        return copy;
+      });
+
+      try {
+        await trackSync(() =>
+          updateSectionContentInCloud(uid, activeSessionId, sectionId, draftText, updatedVersions),
+        );
+      } catch (err) {
+        setGlobalError(formatCloudErrorMessage(err));
+      }
+    },
+    [uid, activeSessionId, trackSync],
+  );
+
+  const handleCreateSession = async () => {
+    setGlobalError(null);
+    const freshId = createId('story');
+    try {
+      await trackSync(() =>
+        createStoryInCloud(uid, {
+          storyId: freshId,
+          title: 'Untitled Story',
+          defaultStyle: activeSession?.defaultStyle ?? 'colloquial',
+          defaultRefinedEnding: activeSession?.defaultRefinedEnding ?? 'colloquial',
+          defaultModel: activeSession?.defaultModel ?? 'gemini-2.5-flash',
+        }),
+      );
+      titleDirtyRef.current = false;
+      setActiveSessionId(freshId);
+    } catch (err) {
+      setGlobalError(formatCloudErrorMessage(err));
+    }
   };
 
-  const handleStyleChange = (style: WritingStyle) => {
-    updateActiveSession((session) => ({ ...session, defaultStyle: style }));
+  const handleRenameSession = async (id: string, title: string) => {
+    setGlobalError(null);
+    const clean = title.trim() || 'Untitled Story';
+    try {
+      await trackSync(() => renameStoryInCloud(uid, id, clean));
+    } catch (err) {
+      setGlobalError(formatCloudErrorMessage(err));
+    }
   };
 
-  const handleRefinedEndingChange = (ending: VoiceEnding) => {
-    updateActiveSession((session) => ({ ...session, defaultRefinedEnding: ending }));
+  const handleTitleInputChange = (nextTitle: string) => {
+    if (!activeSession) return;
+    titleDirtyRef.current = true;
+    setTitleDraft(nextTitle);
+
+    if (titleDebounceRef.current !== null) {
+      window.clearTimeout(titleDebounceRef.current);
+    }
+    const targetStoryId = activeSession.id;
+    titleDebounceRef.current = window.setTimeout(() => {
+      titleDebounceRef.current = null;
+      titleDirtyRef.current = false;
+      void handleRenameSession(targetStoryId, nextTitle);
+    }, 550);
   };
 
-  const handleModelChange = (model: GeminiModel) => {
-    updateActiveSession((session) => ({ ...session, defaultModel: model }));
+  const handleTitleInputBlur = () => {
+    if (!activeSession) return;
+    if (titleDebounceRef.current !== null) {
+      window.clearTimeout(titleDebounceRef.current);
+      titleDebounceRef.current = null;
+    }
+    const clean = titleDraft.trim() || 'Untitled Story';
+    setTitleDraft(clean);
+    if (titleDirtyRef.current || clean !== activeSession.title) {
+      titleDirtyRef.current = false;
+      void handleRenameSession(activeSession.id, clean);
+    }
   };
 
-  const activeRefinedEnding: VoiceEnding = activeSession.defaultRefinedEnding ?? 'colloquial';
+  const handleDeleteSession = async (id: string) => {
+    setGlobalError(null);
+    try {
+      await trackSync(() => deleteStoryInCloud(uid, id));
+      showToast('Story deleted from cloud');
+    } catch (err) {
+      setGlobalError(formatCloudErrorMessage(err));
+    }
+  };
+
+  const handleStyleChange = async (style: WritingStyle) => {
+    if (!activeSession) return;
+    setGlobalError(null);
+    try {
+      await trackSync(() => updateStoryStyleInCloud(uid, activeSession.id, style));
+    } catch (err) {
+      setGlobalError(formatCloudErrorMessage(err));
+    }
+  };
+
+  const handleRefinedEndingChange = async (ending: VoiceEnding) => {
+    if (!activeSession) return;
+    setGlobalError(null);
+    try {
+      await trackSync(() => updateStoryRefinedEndingInCloud(uid, activeSession.id, ending));
+    } catch (err) {
+      setGlobalError(formatCloudErrorMessage(err));
+    }
+  };
+
+  const handleModelChange = async (model: GeminiModel) => {
+    if (!activeSession) return;
+    setGlobalError(null);
+    try {
+      await trackSync(() => updateStoryModelInCloud(uid, activeSession.id, model));
+    } catch (err) {
+      setGlobalError(formatCloudErrorMessage(err));
+    }
+  };
+
+  const activeRefinedEnding: VoiceEnding = activeSession?.defaultRefinedEnding ?? 'colloquial';
 
   const handleTranscribeAudio = async (
     staged: StagedAudio,
     mode: ProcessingMode,
     signal: AbortSignal,
   ) => {
+    if (!activeSession) return;
     setGlobalError(null);
+    const targetStoryId = activeSession.id;
     const targetStyle = activeSession.defaultStyle;
     const targetEnding = activeRefinedEnding;
     const targetModel = activeSession.defaultModel;
 
+    // 1. Transcribe / polish via server-side Gemini API
     const result = await transcribeAudioApi({
       blob: staged.blob,
       filename: staged.filename,
@@ -212,7 +512,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       signal,
     });
 
-    const audioId = createId('audio');
+    const sectionId = createId('sec');
     const audioMeta = {
       filename: staged.filename,
       mimeType: staged.mimeType,
@@ -220,90 +520,100 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       sizeBytes: staged.sizeBytes,
     };
 
-    // Persist original audio locally in IndexedDB for replay, backup download, and future re-processing
-    await saveAudioClip(audioId, staged.blob, audioMeta);
+    // 2. Upload original audio to Firebase Storage at users/{uid}/audio/{storyId}/{sectionId}.{ext}
+    let audioUrl: string | undefined;
+    let storagePath: string | undefined;
+    let fallbackAudioId: string | undefined;
 
+    setIsUploadingAudio(true);
+    try {
+      const uploaded = await uploadSectionAudio({
+        uid,
+        storyId: targetStoryId,
+        sectionId,
+        blob: staged.blob,
+        mimeType: staged.mimeType,
+        filename: staged.filename,
+      });
+      audioUrl = uploaded.audioUrl;
+      storagePath = uploaded.storagePath;
+    } catch (uploadErr) {
+      // Preserve audio locally in IndexedDB as fallback so the user never loses a recording
+      fallbackAudioId = createId('audio');
+      await saveAudioClip(fallbackAudioId, staged.blob, audioMeta).catch(() => undefined);
+      setGlobalError(
+        `Text synced to Firestore, but Firebase Storage audio upload failed (${formatCloudErrorMessage(uploadErr)}). A temporary local backup was saved on this device.`,
+      );
+    } finally {
+      setIsUploadingAudio(false);
+    }
+
+    // 3. Save section + initial version history in Cloud Firestore
     const now = new Date().toISOString();
     const initialVersion: SectionVersion = {
       id: createId('ver'),
       text: result.text,
       style: targetStyle,
-      refinedEnding: targetStyle === 'refined_flow' ? targetEnding : undefined,
+      refinedEnding: targetEnding,
       model: targetModel,
       mode,
       timestamp: now,
     };
 
-    const newSection: ManuscriptSection = {
-      id: createId('sec'),
-      content: initialVersion.text,
-      style: initialVersion.style,
-      refinedEnding: initialVersion.refinedEnding,
-      model: initialVersion.model,
-      mode,
-      audioId,
-      audioMeta,
-      versions: [initialVersion],
-      activeVersionIndex: 0,
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    updateActiveSession((session) => ({
-      ...session,
-      sections: [...session.sections, newSection],
-    }));
+    const nextSectionCount = sectionsRef.current.length + 1;
+    await trackSync(() =>
+      createSectionInCloud(uid, targetStoryId, {
+        sectionId,
+        order: Date.now(),
+        initialVersion,
+        audioUrl,
+        storagePath,
+        audioId: fallbackAudioId,
+        audioMeta,
+        nextSectionCount,
+      }),
+    );
 
     const styleDesc = formatCompactStyleLabel(targetStyle, targetEnding);
     showToast(
       mode === 'summarize_structure'
-        ? `Structured summary added (${styleDesc})`
-        : `Section added (${styleDesc})`,
+        ? `Structured summary synced (${styleDesc})`
+        : `Section synced (${styleDesc})`,
     );
   };
 
   const handleUpdateSectionContent = (sectionId: string, nextContent: string) => {
-    const now = new Date().toISOString();
-    updateActiveSession((session) => ({
-      ...session,
-      sections: session.sections.map((sec) => {
-        if (sec.id !== sectionId) return sec;
-        const versions = getSectionVersions(sec);
-        const activeIdx = getActiveVersionIndex(sec);
-        const updatedVersions = versions.map((v, idx) =>
-          idx === activeIdx ? { ...v, text: nextContent, timestamp: now } : v,
-        );
-        return {
-          ...sec,
-          content: nextContent,
-          versions: updatedVersions,
-          activeVersionIndex: activeIdx,
-          updatedAt: now,
-        };
-      }),
-    }));
+    setSectionDrafts((prev) => ({ ...prev, [sectionId]: nextContent }));
+    sectionDraftsRef.current = { ...sectionDraftsRef.current, [sectionId]: nextContent };
+
+    const existingTimer = sectionDebounceRefs.current[sectionId];
+    if (existingTimer !== undefined) {
+      window.clearTimeout(existingTimer);
+    }
+    sectionDebounceRefs.current[sectionId] = window.setTimeout(() => {
+      void flushSectionDraft(sectionId);
+    }, 650);
   };
 
-  const handleSelectSectionVersion = (sectionId: string, versionIndex: number) => {
-    updateActiveSession((session) => ({
-      ...session,
-      sections: session.sections.map((sec) => {
-        if (sec.id !== sectionId) return sec;
-        const versions = getSectionVersions(sec);
-        const clamped = Math.max(0, Math.min(versionIndex, versions.length - 1));
-        const selected = versions[clamped];
-        return {
-          ...sec,
-          content: selected.text,
-          style: selected.style,
-          refinedEnding: selected.refinedEnding,
-          model: selected.model,
-          versions,
-          activeVersionIndex: clamped,
-          updatedAt: selected.timestamp,
-        };
-      }),
-    }));
+  const handleSelectSectionVersion = async (sectionId: string, versionIndex: number) => {
+    if (!activeSession) return;
+    // Flush any pending edits on the current version before switching
+    await flushSectionDraft(sectionId);
+
+    const target = sectionsRef.current.find((s) => s.id === sectionId);
+    if (!target) return;
+    const versions = getSectionVersions(target);
+    const clamped = Math.max(0, Math.min(versionIndex, versions.length - 1));
+    const selected = versions[clamped];
+
+    setGlobalError(null);
+    try {
+      await trackSync(() =>
+        selectSectionVersionInCloud(uid, activeSession.id, sectionId, selected, clamped),
+      );
+    } catch (err) {
+      setGlobalError(formatCloudErrorMessage(err));
+    }
   };
 
   const handleReprocessStyle = async (
@@ -311,7 +621,9 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     targetStyle: WritingStyle,
     targetEnding?: VoiceEnding,
   ) => {
-    if (reprocessingSectionId) return;
+    if (!activeSession || reprocessingSectionId) return;
+    await flushSectionDraft(section.id);
+
     setGlobalError(null);
     setReprocessingSectionId(section.id);
     const chosenModel = activeSession.defaultModel;
@@ -323,7 +635,25 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       let nextText = '';
       let usedAudio = false;
 
-      if (section.audioId) {
+      // 1. Prefer original audio stored in Firebase Storage (works from any device)
+      if (section.storagePath || section.audioUrl) {
+        const cloudBlob = await downloadSectionAudioBlob(section.storagePath, section.audioUrl);
+        if (cloudBlob) {
+          const result = await transcribeAudioApi({
+            blob: cloudBlob,
+            filename: section.audioMeta?.filename || 'recording.webm',
+            style: targetStyle,
+            refinedEnding: resolvedEnding,
+            model: chosenModel,
+            mode: sectionMode,
+          });
+          nextText = result.text;
+          usedAudio = true;
+        }
+      }
+
+      // 2. Fallback to local IndexedDB audio if present
+      if (!usedAudio && section.audioId) {
         const stored = await getAudioClip(section.audioId);
         if (stored?.blob) {
           const result = await transcribeAudioApi({
@@ -339,6 +669,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
         }
       }
 
+      // 3. Fallback to text restyling
       if (!usedAudio) {
         const result = await restyleTextApi({
           text: currentActiveText,
@@ -355,53 +686,52 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
         id: createId('ver'),
         text: nextText,
         style: targetStyle,
-        refinedEnding: targetStyle === 'refined_flow' ? resolvedEnding : undefined,
+        refinedEnding: resolvedEnding,
         model: chosenModel,
         mode: sectionMode,
         timestamp: now,
       };
 
-      const nextVersionNumber = getSectionVersions(section).length + 1;
-      updateActiveSession((session) => ({
-        ...session,
-        sections: session.sections.map((sec) => {
-          if (sec.id !== section.id) return sec;
-          const existingVersions = getSectionVersions(sec);
-          const nextVersions = [...existingVersions, nextVersion];
-          return {
-            ...sec,
-            content: nextVersion.text,
-            style: nextVersion.style,
-            refinedEnding: nextVersion.refinedEnding,
-            model: nextVersion.model,
-            versions: nextVersions,
-            activeVersionIndex: nextVersions.length - 1,
-            updatedAt: now,
-          };
-        }),
-      }));
+      const existingVersions = getSectionVersions(section);
+      const nextVersions = [...existingVersions, nextVersion];
+
+      await trackSync(() =>
+        appendSectionVersionInCloud(uid, activeSession.id, section.id, nextVersions),
+      );
 
       const styleDesc = formatCompactStyleLabel(targetStyle, resolvedEnding);
-      showToast(`Saved as v${nextVersionNumber} (${styleDesc})`);
+      showToast(`Saved as v${nextVersions.length} (${styleDesc})`);
     } catch (err) {
-      const msg =
-        err instanceof Error ? err.message : 'Could not re-process this section. Please try again.';
-      setGlobalError(msg);
+      setGlobalError(formatCloudErrorMessage(err));
     } finally {
       setReprocessingSectionId(null);
     }
   };
 
-  const handleDeleteSection = (sectionId: string) => {
-    const target = activeSession.sections.find((s) => s.id === sectionId);
+  const handleDeleteSection = async (sectionId: string) => {
+    if (!activeSession) return;
+    setGlobalError(null);
+    const target = sectionsRef.current.find((s) => s.id === sectionId);
+    const nextSectionCount = Math.max(0, sectionsRef.current.length - 1);
+
     if (target?.audioId) {
       deleteAudioClip(target.audioId).catch(() => undefined);
     }
-    updateActiveSession((session) => ({
-      ...session,
-      sections: session.sections.filter((s) => s.id !== sectionId),
-    }));
-    showToast('Section deleted');
+
+    try {
+      await trackSync(() =>
+        deleteSectionInCloud(
+          uid,
+          activeSession.id,
+          sectionId,
+          target?.storagePath,
+          nextSectionCount,
+        ),
+      );
+      showToast('Section deleted');
+    } catch (err) {
+      setGlobalError(formatCloudErrorMessage(err));
+    }
   };
 
   const copyToClipboard = async (text: string, label = 'Copied to clipboard') => {
@@ -409,7 +739,6 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       await navigator.clipboard.writeText(text);
       showToast(label);
     } catch {
-      // Fallback copy method inside restricted iframes
       const temp = document.createElement('textarea');
       temp.value = text;
       temp.style.position = 'fixed';
@@ -422,8 +751,18 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     }
   };
 
+  const activeSessionWithSections: StorySession | null = useMemo(() => {
+    if (!activeSession) return null;
+    return {
+      ...activeSession,
+      title: titleDraft || activeSession.title,
+      sections: orderedSections,
+    };
+  }, [activeSession, titleDraft, orderedSections]);
+
   const handleCopyFullStory = async () => {
-    const fullText = compileFullStoryPlainText(activeSession);
+    if (!activeSessionWithSections) return;
+    const fullText = compileFullStoryPlainText(activeSessionWithSections);
     if (!fullText) return;
     await copyToClipboard(fullText, 'Full story copied');
     setCopiedFull(true);
@@ -431,25 +770,22 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   };
 
   const handleExportTxt = () => {
-    const content = compileFullStoryPlainText(activeSession);
+    if (!activeSessionWithSections) return;
+    const content = compileFullStoryPlainText(activeSessionWithSections);
     if (!content) return;
     const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
-    triggerBlobDownload(blob, safeExportFilename(activeSession.title, 'txt'));
+    triggerBlobDownload(blob, safeExportFilename(activeSessionWithSections.title, 'txt'));
     showToast('Exported as .txt');
   };
 
   const handleExportMd = () => {
-    const content = compileFullStoryMarkdown(activeSession);
+    if (!activeSessionWithSections) return;
+    const content = compileFullStoryMarkdown(activeSessionWithSections);
     if (!content) return;
     const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
-    triggerBlobDownload(blob, safeExportFilename(activeSession.title, 'md'));
+    triggerBlobDownload(blob, safeExportFilename(activeSessionWithSections.title, 'md'));
     showToast('Exported as .md');
   };
-
-  const orderedSections = useMemo(
-    () => sortSectionsChronologically(activeSession.sections),
-    [activeSession.sections],
-  );
 
   const totalCharacters = useMemo(
     () =>
@@ -464,11 +800,30 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     (s) => getActiveSectionVersion(s).text.trim().length > 0,
   );
 
+  const isSyncing = pendingSyncOps > 0 || Object.keys(sectionDrafts).length > 0;
+
+  if (!storiesLoaded || !activeSession) {
+    return (
+      <div className="flex h-screen w-full flex-col items-center justify-center bg-white px-6 text-[#111827]">
+        <div className="flex flex-col items-center gap-3 text-center">
+          <Loader2 className="h-5 w-5 animate-spin text-[#4338CA]" aria-hidden="true" />
+          <p className="text-sm font-medium text-[#6B7280]">Loading your cloud stories…</p>
+          {globalError && (
+            <p className="mt-2 max-w-md rounded-lg border border-[#FECACA] bg-[#FEF2F2] px-4 py-2.5 text-xs text-[#991B1B]">
+              {globalError}
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-screen w-full overflow-hidden bg-white text-[#111827]">
       <Sidebar
-        sessions={sessions}
+        sessions={stories}
         activeSessionId={activeSession.id}
+        activeSectionCount={orderedSections.length}
         isOpen={sidebarOpen}
         userEmail={user.email}
         onSignOut={() => {
@@ -477,18 +832,25 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
         onCloseMobile={() => setSidebarOpen(false)}
         onToggleDesktop={() => setSidebarOpen((prev) => !prev)}
         onSelectSession={(id) => {
+          titleDirtyRef.current = false;
           setActiveSessionId(id);
           setGlobalError(null);
         }}
-        onCreateSession={handleCreateSession}
-        onRenameSession={handleRenameSession}
-        onDeleteSession={handleDeleteSession}
+        onCreateSession={() => {
+          void handleCreateSession();
+        }}
+        onRenameSession={(id, title) => {
+          void handleRenameSession(id, title);
+        }}
+        onDeleteSession={(id) => {
+          void handleDeleteSession(id);
+        }}
       />
 
       {/* Main editorial column */}
       <div className="flex min-w-0 flex-1 flex-col bg-white">
         {/* Top document utility bar */}
-        <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b border-[#E5E7EB] bg-white px-4 sm:px-6">
+        <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-[#E5E7EB] bg-white px-4 sm:px-6">
           <div className="flex min-w-0 items-center gap-3">
             {!sidebarOpen && (
               <button
@@ -502,20 +864,49 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
               </button>
             )}
 
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 text-sm">
-                {!sidebarOpen && (
+            <div className="flex min-w-0 items-center gap-2 text-sm">
+              {!sidebarOpen && (
+                <>
+                  <span className="hidden whitespace-nowrap font-semibold tracking-tight text-[#111827] sm:inline">
+                    SarYay
+                  </span>
+                  <span aria-hidden="true" className="hidden text-[#D1D5DB] sm:inline">
+                    /
+                  </span>
+                </>
+              )}
+              <span className="truncate font-medium text-[#374151]">
+                {titleDraft || activeSession.title || 'Untitled Story'}
+              </span>
+
+              {/* Minimal Cloud Sync / Upload Indicator */}
+              <span
+                className={`ml-1 hidden shrink-0 items-center gap-1 text-[11px] sm:inline-flex ${
+                  isUploadingAudio
+                    ? 'font-medium text-[#4338CA]'
+                    : isSyncing
+                      ? 'text-[#6B7280]'
+                      : 'text-[#9CA3AF]'
+                }`}
+                aria-live="polite"
+              >
+                {isUploadingAudio ? (
                   <>
-                    <span className="hidden font-semibold tracking-tight text-[#111827] sm:inline whitespace-nowrap">
-                      Sarpay Studio
-                    </span>
-                    <span aria-hidden="true" className="hidden text-[#D1D5DB] sm:inline">/</span>
+                    <CloudUpload className="h-3.5 w-3.5 animate-pulse" />
+                    <span>Uploading audio…</span>
+                  </>
+                ) : isSyncing ? (
+                  <>
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    <span>Syncing…</span>
+                  </>
+                ) : (
+                  <>
+                    <Cloud className="h-3.5 w-3.5" />
+                    <span>Synced</span>
                   </>
                 )}
-                <span className="truncate font-medium text-[#374151]">
-                  {activeSession.title || 'Untitled Story'}
-                </span>
-              </div>
+              </span>
             </div>
           </div>
 
@@ -586,15 +977,9 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
             <div className="mb-5">
               <input
                 type="text"
-                value={activeSession.title}
-                onChange={(e) =>
-                  handleRenameSession(activeSession.id, e.target.value)
-                }
-                onBlur={(e) => {
-                  if (!e.target.value.trim()) {
-                    handleRenameSession(activeSession.id, 'Untitled Story');
-                  }
-                }}
+                value={titleDraft}
+                onChange={(e) => handleTitleInputChange(e.target.value)}
+                onBlur={handleTitleInputBlur}
                 placeholder="Untitled Story"
                 aria-label="Story title"
                 className="font-manuscript w-full border-0 bg-transparent p-0 text-2xl font-semibold tracking-tight text-[#111827] placeholder:text-[#9CA3AF] focus:outline-none sm:text-[28px]"
@@ -602,29 +987,41 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
 
               <div className="mt-1.5 flex items-center gap-1.5 text-xs text-[#6B7280] tabular-nums">
                 <span>
-                  {activeSession.sections.length}{' '}
-                  {activeSession.sections.length === 1 ? 'section' : 'sections'}
+                  {orderedSections.length}{' '}
+                  {orderedSections.length === 1 ? 'section' : 'sections'}
                 </span>
                 <span aria-hidden="true">·</span>
                 <span>{totalCharacters.toLocaleString()} characters</span>
+                {(isUploadingAudio || isSyncing) && (
+                  <span className="inline-flex items-center gap-1 text-[#4338CA] sm:hidden">
+                    <span aria-hidden="true">·</span>
+                    <span>{isUploadingAudio ? 'Uploading audio…' : 'Syncing…'}</span>
+                  </span>
+                )}
               </div>
             </div>
 
             {/* Compact Dictation & Upload Bar */}
             <div className="mb-7">
               <DictationDock
-                storyTitle={activeSession.title}
+                storyTitle={titleDraft || activeSession.title}
                 style={activeSession.defaultStyle}
                 refinedEnding={activeRefinedEnding}
                 model={activeSession.defaultModel}
-                onStyleChange={handleStyleChange}
-                onRefinedEndingChange={handleRefinedEndingChange}
-                onModelChange={handleModelChange}
+                onStyleChange={(nextStyle) => {
+                  void handleStyleChange(nextStyle);
+                }}
+                onRefinedEndingChange={(nextEnding) => {
+                  void handleRefinedEndingChange(nextEnding);
+                }}
+                onModelChange={(nextModel) => {
+                  void handleModelChange(nextModel);
+                }}
                 onTranscribe={handleTranscribeAudio}
               />
             </div>
 
-            {/* Global error banner (e.g., re-processing error) */}
+            {/* Global error banner (e.g., cloud sync, storage, or re-processing error) */}
             {globalError && (
               <div
                 role="alert"
@@ -645,6 +1042,14 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
               </div>
             )}
 
+            {/* Loading sections state */}
+            {!sectionsLoaded && orderedSections.length === 0 ? (
+              <div className="flex items-center gap-2 py-8 text-xs text-[#6B7280]">
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-[#4338CA]" />
+                <span>Syncing sections…</span>
+              </div>
+            ) : null}
+
             {/* Manuscript Sections Stream (oldest to newest as spoken, directly below recorder) */}
             {orderedSections.length > 0 && (
               <div className="space-y-6 pb-16">
@@ -656,9 +1061,16 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                     activeModel={activeSession.defaultModel}
                     isReprocessing={reprocessingSectionId === section.id}
                     onUpdateContent={handleUpdateSectionContent}
-                    onSelectVersion={handleSelectSectionVersion}
+                    onFlushContent={(secId) => {
+                      void flushSectionDraft(secId);
+                    }}
+                    onSelectVersion={(secId, versionIdx) => {
+                      void handleSelectSectionVersion(secId, versionIdx);
+                    }}
                     onReprocessStyle={handleReprocessStyle}
-                    onDeleteSection={handleDeleteSection}
+                    onDeleteSection={(secId) => {
+                      void handleDeleteSection(secId);
+                    }}
                     onCopyText={(txt) => copyToClipboard(txt, 'Section copied')}
                   />
                 ))}

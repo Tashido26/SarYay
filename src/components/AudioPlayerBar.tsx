@@ -1,14 +1,18 @@
 import { useEffect, useRef, useState } from 'react';
-import { Download, Pause, Play, Volume2 } from 'lucide-react';
+import { Download, Loader2, Pause, Play, Volume2 } from 'lucide-react';
 import type { AudioMeta } from '../types.ts';
 import { getAudioClip } from '../lib/audioDb.ts';
+import { downloadSectionAudioBlob } from '../lib/cloudStore.ts';
 import { formatDuration, formatFileSize, triggerBlobDownload } from '../lib/format.ts';
 
 interface AudioPlayerBarProps {
-  /** Direct blob + object URL for staged audio before saving to IndexedDB */
+  /** Direct blob + object URL for staged audio before uploading */
   directBlob?: Blob;
   directUrl?: string;
-  /** IndexedDB audio clip ID for persisted section audio */
+  /** Cloud Firebase Storage download URL and path for cross-device playback */
+  audioUrl?: string;
+  storagePath?: string;
+  /** Fallback IndexedDB audio clip ID if Storage upload was unavailable */
   audioId?: string;
   meta: AudioMeta;
   compact?: boolean;
@@ -17,14 +21,19 @@ interface AudioPlayerBarProps {
 export function AudioPlayerBar({
   directBlob,
   directUrl,
+  audioUrl,
+  storagePath,
   audioId,
   meta,
   compact = false,
 }: AudioPlayerBarProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const [resolvedUrl, setResolvedUrl] = useState<string | null>(directUrl ?? null);
+  const [resolvedUrl, setResolvedUrl] = useState<string | null>(directUrl ?? audioUrl ?? null);
   const [resolvedBlob, setResolvedBlob] = useState<Blob | null>(directBlob ?? null);
-  const [loadingClip, setLoadingClip] = useState<boolean>(!directUrl && Boolean(audioId));
+  const [loadingClip, setLoadingClip] = useState<boolean>(
+    !directUrl && !audioUrl && Boolean(audioId),
+  );
+  const [downloading, setDownloading] = useState(false);
   const [missingClip, setMissingClip] = useState<boolean>(false);
 
   const [isPlaying, setIsPlaying] = useState(false);
@@ -35,6 +44,17 @@ export function AudioPlayerBar({
     if (directUrl && directBlob) {
       setResolvedUrl(directUrl);
       setResolvedBlob(directBlob);
+      setLoadingClip(false);
+      setMissingClip(false);
+      setDuration(meta.durationSec || 0);
+      setCurrentTime(0);
+      setIsPlaying(false);
+      return;
+    }
+
+    if (audioUrl) {
+      setResolvedUrl(audioUrl);
+      setResolvedBlob(null);
       setLoadingClip(false);
       setMissingClip(false);
       setDuration(meta.durationSec || 0);
@@ -74,7 +94,7 @@ export function AudioPlayerBar({
         URL.revokeObjectURL(createdUrl);
       }
     };
-  }, [audioId, directBlob, directUrl, meta.durationSec]);
+  }, [audioId, audioUrl, directBlob, directUrl, meta.durationSec]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -130,9 +150,32 @@ export function AudioPlayerBar({
     }
   };
 
-  const handleDownload = () => {
-    if (!resolvedBlob) return;
-    triggerBlobDownload(resolvedBlob, meta.filename || 'recording.webm');
+  const handleDownload = async () => {
+    const filename = meta.filename || 'recording.webm';
+    if (resolvedBlob) {
+      triggerBlobDownload(resolvedBlob, filename);
+      return;
+    }
+    if (storagePath || audioUrl) {
+      setDownloading(true);
+      try {
+        const blob = await downloadSectionAudioBlob(storagePath, audioUrl);
+        if (blob) {
+          setResolvedBlob(blob);
+          triggerBlobDownload(blob, filename);
+        } else if (audioUrl) {
+          const anchor = document.createElement('a');
+          anchor.href = audioUrl;
+          anchor.download = filename;
+          anchor.rel = 'noopener noreferrer';
+          document.body.appendChild(anchor);
+          anchor.click();
+          document.body.removeChild(anchor);
+        }
+      } finally {
+        setDownloading(false);
+      }
+    }
   };
 
   if (loadingClip) {
@@ -148,7 +191,7 @@ export function AudioPlayerBar({
     return (
       <div className="flex items-center gap-3 rounded-lg border border-[#E5E7EB] bg-[#F8F9FA] px-3.5 py-2.5 text-xs text-[#6B7280]">
         <Volume2 className="h-4 w-4 shrink-0 text-[#9CA3AF]" />
-        <span>Original audio clip is no longer in local browser storage.</span>
+        <span>Audio clip is not available on this device.</span>
       </div>
     );
   }
@@ -199,11 +242,16 @@ export function AudioPlayerBar({
         </span>
         <button
           type="button"
+          disabled={downloading}
           onClick={handleDownload}
-          className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border border-[#E5E7EB] bg-white px-3 py-1.5 text-xs font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA]"
+          className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border border-[#E5E7EB] bg-white px-3 py-1.5 text-xs font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:opacity-60"
           title="Download audio backup locally"
         >
-          <Download className="h-3.5 w-3.5" />
+          {downloading ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Download className="h-3.5 w-3.5" />
+          )}
           <span>Download Audio</span>
         </button>
       </div>

@@ -25,11 +25,16 @@ export interface SectionVersion {
 
 export interface ManuscriptSection {
   id: string;
+  ownerId?: string;
+  storyId?: string;
+  order?: number;
   content: string;
   style: WritingStyle;
   refinedEnding?: VoiceEnding;
   model: GeminiModel;
   mode?: ProcessingMode;
+  audioUrl?: string;
+  storagePath?: string;
   audioId?: string;
   audioMeta?: AudioMeta;
   versions?: SectionVersion[];
@@ -40,10 +45,12 @@ export interface ManuscriptSection {
 
 export interface StorySession {
   id: string;
+  ownerId?: string;
   title: string;
   defaultStyle: WritingStyle;
   defaultRefinedEnding?: VoiceEnding;
   defaultModel: GeminiModel;
+  sectionCount?: number;
   sections: ManuscriptSection[];
   createdAt: string;
   updatedAt: string;

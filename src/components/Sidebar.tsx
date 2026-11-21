@@ -7,6 +7,7 @@ import { formatTimestamp } from '../lib/format.ts';
 interface SidebarProps {
   sessions: StorySession[];
   activeSessionId: string;
+  activeSectionCount: number;
   isOpen: boolean;
   userEmail?: string | null;
   onSignOut: () => void;
@@ -21,6 +22,7 @@ interface SidebarProps {
 export function Sidebar({
   sessions,
   activeSessionId,
+  activeSectionCount,
   isOpen,
   userEmail,
   onSignOut,
@@ -69,7 +71,7 @@ export function Sidebar({
       {/* Brand header */}
       <div className="flex h-14 shrink-0 items-center justify-between px-4">
         <span className="text-[15px] font-semibold tracking-tight text-[#111827] whitespace-nowrap">
-          Sarpay Studio
+          SarYay
         </span>
         <button
           type="button"
@@ -115,7 +117,9 @@ export function Sidebar({
           const isActive = session.id === activeSessionId;
           const isEditing = editingId === session.id;
           const isConfirmingDelete = confirmDeleteId === session.id;
-          const sectionCount = session.sections.length;
+          const sectionCount = isActive
+            ? activeSectionCount
+            : (session.sectionCount ?? session.sections.length);
           const styleShort = STYLE_SHORT_LABELS[session.defaultStyle] ?? 'Colloquial';
 
           return (
@@ -247,7 +251,7 @@ export function Sidebar({
                 {userEmail}
               </p>
             ) : null}
-            <p className="text-[11px] text-[#6B7280]">Saved locally in browser</p>
+            <p className="text-[11px] text-[#6B7280]">Synced with Firebase Cloud</p>
           </div>
           <button
             type="button"

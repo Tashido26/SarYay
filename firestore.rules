@@ -1,0 +1,306 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 0: Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 3: Reusable Hardened Global Helpers
+    // -------------------------------------------------------------------------
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string
+        && id.size() >= 1
+        && id.size() <= 128
+        && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Strict verified-email whitelist + UID path ownership gate
+    function isAuthorizedOwner(userId) {
+      return isSignedIn()
+        && request.auth.token.email_verified == true
+        && request.auth.token.email is string
+        && request.auth.token.email.lower() == 'herozboy@gmail.com'
+        && request.auth.uid == userId;
+    }
+
+    function isValidStyle(style) {
+      return style is string && style in ['colloquial', 'literary', 'refined_flow'];
+    }
+
+    function isValidEnding(ending) {
+      return ending is string && ending in ['colloquial', 'literary'];
+    }
+
+    function isValidModel(model) {
+      return model is string && model in ['gemini-2.5-flash', 'gemini-2.5-pro'];
+    }
+
+    function isValidMode(mode) {
+      return mode is string && mode in ['full_polish', 'summarize_structure'];
+    }
+
+    function isValidAudioMeta(meta) {
+      return meta is map
+        && meta.keys().hasAll(['filename', 'mimeType', 'durationSec', 'sizeBytes'])
+        && meta.keys().hasOnly(['filename', 'mimeType', 'durationSec', 'sizeBytes'])
+        && meta.filename is string && meta.filename.size() >= 1 && meta.filename.size() <= 260
+        && meta.mimeType is string && meta.mimeType.size() >= 1 && meta.mimeType.size() <= 100
+        && meta.durationSec is number && meta.durationSec >= 0 && meta.durationSec <= 86400
+        && meta.sizeBytes is number && meta.sizeBytes >= 0 && meta.sizeBytes <= 104857600;
+    }
+
+    function isValidVersionItem(v) {
+      return v is map
+        && v.keys().hasAll(['id', 'text', 'style', 'refinedEnding', 'model', 'mode', 'timestamp'])
+        && v.keys().hasOnly(['id', 'text', 'style', 'refinedEnding', 'model', 'mode', 'timestamp'])
+        && isValidId(v.id)
+        && v.text is string && v.text.size() <= 200000
+        && isValidStyle(v.style)
+        && isValidEnding(v.refinedEnding)
+        && isValidModel(v.model)
+        && isValidMode(v.mode)
+        && v.timestamp is string && v.timestamp.size() >= 1 && v.timestamp.size() <= 64;
+    }
+
+    // -------------------------------------------------------------------------
+    // Pillar 2: Validation Blueprints (Anti-Update-Gap)
+    // -------------------------------------------------------------------------
+    function isValidStory(data, userId) {
+      return data.keys().hasAll([
+          'ownerId',
+          'title',
+          'defaultStyle',
+          'defaultRefinedEnding',
+          'defaultModel',
+          'sectionCount',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId',
+          'title',
+          'defaultStyle',
+          'defaultRefinedEnding',
+          'defaultModel',
+          'sectionCount',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.ownerId == userId
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 300
+        && isValidStyle(data.defaultStyle)
+        && isValidEnding(data.defaultRefinedEnding)
+        && isValidModel(data.defaultModel)
+        && data.sectionCount is int && data.sectionCount >= 0 && data.sectionCount <= 5000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidSection(data, userId, storyId) {
+      return data.keys().hasAll([
+          'ownerId',
+          'storyId',
+          'order',
+          'content',
+          'style',
+          'refinedEnding',
+          'model',
+          'mode',
+          'versions',
+          'activeVersionIndex',
+          'audioUrl',
+          'storagePath',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId',
+          'storyId',
+          'order',
+          'content',
+          'style',
+          'refinedEnding',
+          'model',
+          'mode',
+          'versions',
+          'activeVersionIndex',
+          'audioUrl',
+          'storagePath',
+          'audioId',
+          'audioMeta',
+          'createdAt',
+          'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.ownerId == userId
+        && isValidId(data.storyId)
+        && data.storyId == storyId
+        && data.order is number && data.order >= 0
+        && data.content is string && data.content.size() <= 200000
+        && isValidStyle(data.style)
+        && isValidEnding(data.refinedEnding)
+        && isValidModel(data.model)
+        && isValidMode(data.mode)
+        && data.versions is list
+        && data.versions.size() >= 1
+        && data.versions.size() <= 50
+        && data.activeVersionIndex is int
+        && data.activeVersionIndex >= 0
+        && data.activeVersionIndex < data.versions.size()
+        && isValidVersionItem(data.versions[0])
+        && isValidVersionItem(data.versions[data.activeVersionIndex])
+        && data.audioUrl is string && data.audioUrl.size() <= 2048
+        && data.storagePath is string && data.storagePath.size() <= 512
+        && (!('audioId' in data) || (data.audioId is string && data.audioId.size() <= 128))
+        && (!('audioMeta' in data) || isValidAudioMeta(data.audioMeta))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // -------------------------------------------------------------------------
+    // Collection: /users/{userId}/stories/{storyId}
+    // -------------------------------------------------------------------------
+    match /users/{userId}/stories/{storyId} {
+      allow get: if isAuthorizedOwner(userId)
+        && isValidId(userId)
+        && isValidId(storyId)
+        && existing().ownerId == request.auth.uid;
+
+      // Pillar 8: Secure list query without get()/exists() lookups
+      allow list: if isAuthorizedOwner(userId)
+        && existing().ownerId == request.auth.uid;
+
+      allow create: if isAuthorizedOwner(userId)
+        && isValidId(userId)
+        && isValidId(storyId)
+        && isValidStory(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isAuthorizedOwner(userId)
+        && isValidId(userId)
+        && isValidId(storyId)
+        && isValidStory(incoming(), userId)
+        && existing().ownerId == request.auth.uid
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action: Rename story
+          incoming().diff(existing()).affectedKeys().hasOnly(['title', 'updatedAt'])
+          // Action: Update default style / ending / model preferences
+          || incoming().diff(existing()).affectedKeys().hasOnly(['defaultStyle', 'updatedAt'])
+          || incoming().diff(existing()).affectedKeys().hasOnly(['defaultRefinedEnding', 'updatedAt'])
+          || incoming().diff(existing()).affectedKeys().hasOnly(['defaultModel', 'updatedAt'])
+          // Action: Touch story metadata / section count when sections are added, edited, or removed
+          || incoming().diff(existing()).affectedKeys().hasOnly(['sectionCount', 'updatedAt'])
+          || incoming().diff(existing()).affectedKeys().hasOnly(['updatedAt'])
+        );
+
+      allow delete: if isAuthorizedOwner(userId)
+        && isValidId(userId)
+        && isValidId(storyId)
+        && existing().ownerId == request.auth.uid;
+
+      // -----------------------------------------------------------------------
+      // Subcollection: /users/{userId}/stories/{storyId}/sections/{sectionId}
+      // -----------------------------------------------------------------------
+      match /sections/{sectionId} {
+        function parentStoryBelongsToOwner() {
+          return exists(/databases/$(database)/documents/users/$(userId)/stories/$(storyId))
+            && get(/databases/$(database)/documents/users/$(userId)/stories/$(storyId)).data.ownerId == request.auth.uid;
+        }
+
+        allow get: if isAuthorizedOwner(userId)
+          && isValidId(userId)
+          && isValidId(storyId)
+          && isValidId(sectionId)
+          && existing().ownerId == request.auth.uid
+          && existing().storyId == storyId
+          && parentStoryBelongsToOwner();
+
+        // Pillar 8: Secure list query checking resource.data without get()/exists()
+        allow list: if isAuthorizedOwner(userId)
+          && existing().ownerId == request.auth.uid
+          && existing().storyId == storyId;
+
+        allow create: if isAuthorizedOwner(userId)
+          && isValidId(userId)
+          && isValidId(storyId)
+          && isValidId(sectionId)
+          && isValidSection(incoming(), userId, storyId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && parentStoryBelongsToOwner();
+
+        allow update: if isAuthorizedOwner(userId)
+          && isValidId(userId)
+          && isValidId(storyId)
+          && isValidId(sectionId)
+          && isValidSection(incoming(), userId, storyId)
+          && existing().ownerId == request.auth.uid
+          && existing().storyId == storyId
+          && incoming().ownerId == existing().ownerId
+          && incoming().storyId == existing().storyId
+          && incoming().order == existing().order
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && parentStoryBelongsToOwner()
+          && (
+            // Action: Edit active version prose text
+            incoming().diff(existing()).affectedKeys().hasOnly(['content', 'versions', 'updatedAt'])
+            // Action: Switch active version (< v1 / v2 >)
+            || incoming().diff(existing()).affectedKeys().hasOnly([
+              'content',
+              'style',
+              'refinedEnding',
+              'model',
+              'activeVersionIndex',
+              'updatedAt'
+            ])
+            // Action: Append newly re-processed style version
+            || incoming().diff(existing()).affectedKeys().hasOnly([
+              'content',
+              'style',
+              'refinedEnding',
+              'model',
+              'versions',
+              'activeVersionIndex',
+              'updatedAt'
+            ])
+            // Action: Attach uploaded Firebase Storage audio URL/path after upload
+            || incoming().diff(existing()).affectedKeys().hasOnly([
+              'audioUrl',
+              'storagePath',
+              'updatedAt'
+            ])
+          );
+
+        allow delete: if isAuthorizedOwner(userId)
+          && isValidId(userId)
+          && isValidId(storyId)
+          && isValidId(sectionId)
+          && existing().ownerId == request.auth.uid
+          && existing().storyId == storyId
+          && parentStoryBelongsToOwner();
+      }
+    }
+  }
+}

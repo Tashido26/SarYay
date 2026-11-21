@@ -1,0 +1,176 @@
+{
+  "entities": {
+    "Story": {
+      "title": "Story",
+      "description": "A user's private writing session / story containing ordered manuscript sections.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the story owner."
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300,
+          "description": "Editable title of the story."
+        },
+        "defaultStyle": {
+          "type": "string",
+          "enum": ["colloquial", "literary", "refined_flow"],
+          "description": "Default writing style selected for new recordings in this story."
+        },
+        "defaultRefinedEnding": {
+          "type": "string",
+          "enum": ["colloquial", "literary"],
+          "description": "Default Burmese voice ending when Refined Flow is active."
+        },
+        "defaultModel": {
+          "type": "string",
+          "enum": ["gemini-2.5-flash", "gemini-2.5-pro"],
+          "description": "Default Gemini model selected for this story."
+        },
+        "sectionCount": {
+          "type": "integer",
+          "description": "Current number of sections belonging to this story (0..5000)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the story was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the story was last updated."
+        }
+      },
+      "required": [
+        "ownerId",
+        "title",
+        "defaultStyle",
+        "defaultRefinedEnding",
+        "defaultModel",
+        "sectionCount",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Section": {
+      "title": "Section",
+      "description": "A single transcribed or uploaded voice section inside a story, with non-destructive style version history and Firebase Storage audio metadata.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the section owner."
+        },
+        "storyId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Parent story document ID."
+        },
+        "order": {
+          "type": "number",
+          "description": "Monotonic numeric ordering key (epoch ms) preserving chronological order across devices."
+        },
+        "content": {
+          "type": "string",
+          "maxLength": 200000,
+          "description": "Active version prose text synchronized with versions[activeVersionIndex].text."
+        },
+        "style": {
+          "type": "string",
+          "enum": ["colloquial", "literary", "refined_flow"],
+          "description": "Writing style of the currently active version."
+        },
+        "refinedEnding": {
+          "type": "string",
+          "enum": ["colloquial", "literary"],
+          "description": "Burmese voice ending of the currently active version."
+        },
+        "model": {
+          "type": "string",
+          "enum": ["gemini-2.5-flash", "gemini-2.5-pro"],
+          "description": "Gemini model used for the currently active version."
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["full_polish", "summarize_structure"],
+          "description": "Processing mode used for this section."
+        },
+        "versions": {
+          "type": "array",
+          "description": "Bounded non-destructive version history array (1..50 items)."
+        },
+        "activeVersionIndex": {
+          "type": "integer",
+          "description": "Zero-based index of the currently active version inside versions."
+        },
+        "audioUrl": {
+          "type": "string",
+          "maxLength": 2048,
+          "description": "Firebase Storage download URL for the original audio clip (or empty string if unavailable)."
+        },
+        "storagePath": {
+          "type": "string",
+          "maxLength": 512,
+          "description": "Firebase Storage object path users/{uid}/audio/{storyId}/{sectionId}.{ext} (or empty string)."
+        },
+        "audioId": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Optional local fallback audio clip ID (or empty string)."
+        },
+        "audioMeta": {
+          "type": "object",
+          "description": "Metadata describing the recorded or uploaded audio file (filename, mimeType, durationSec, sizeBytes)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the section was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the section was last modified."
+        }
+      },
+      "required": [
+        "ownerId",
+        "storyId",
+        "order",
+        "content",
+        "style",
+        "refinedEnding",
+        "model",
+        "mode",
+        "versions",
+        "activeVersionIndex",
+        "audioUrl",
+        "storagePath",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/stories/{storyId}": {
+      "schema": { "$ref": "#/entities/Story" },
+      "description": "Private stories owned by the authenticated whitelisted user."
+    },
+    "/users/{userId}/stories/{storyId}/sections/{sectionId}": {
+      "schema": { "$ref": "#/entities/Section" },
+      "description": "Ordered manuscript sections and version histories belonging to a story."
+    }
+  }
+}

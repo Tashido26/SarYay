@@ -168,7 +168,7 @@ export function AuthGate({ children }: AuthGateProps) {
         <StudioMark />
 
         <div className="mt-6 text-center">
-          <p className="text-xs font-medium tracking-wide text-[#4338CA]">Sarpay Studio</p>
+          <p className="text-xs font-medium tracking-wide text-[#4338CA]">SarYay</p>
           <h1 className="mt-1.5 text-2xl font-semibold tracking-tight text-[#111827] [text-wrap:balance]">
             Personal Voice &amp; Story Studio
           </h1>

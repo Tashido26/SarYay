@@ -147,6 +147,11 @@ export function sortSectionsChronologically(
   return sections
     .map((section, index) => ({ section, index }))
     .sort((a, b) => {
+      const orderA = typeof a.section.order === 'number' ? a.section.order : null;
+      const orderB = typeof b.section.order === 'number' ? b.section.order : null;
+      if (orderA !== null && orderB !== null && orderA !== orderB) {
+        return orderA - orderB;
+      }
       const timeA = Date.parse(a.section.createdAt);
       const timeB = Date.parse(b.section.createdAt);
       if (Number.isFinite(timeA) && Number.isFinite(timeB) && timeA !== timeB) {

@@ -1,0 +1,28 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Deny all access by default
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+
+    // Private audio recordings & uploads scoped to the authorized user's UID
+    match /users/{userId}/audio/{storyId}/{fileName} {
+      allow read, delete: if request.auth != null
+        && request.auth.uid == userId
+        && request.auth.token.email_verified == true
+        && request.auth.token.email.lower() == 'herozboy@gmail.com';
+
+      allow create, update: if request.auth != null
+        && request.auth.uid == userId
+        && request.auth.token.email_verified == true
+        && request.auth.token.email.lower() == 'herozboy@gmail.com'
+        && request.resource.size <= 60 * 1024 * 1024
+        && (
+          request.resource.contentType.matches('audio/.*')
+          || request.resource.contentType == 'video/webm'
+          || request.resource.contentType == 'application/octet-stream'
+        );
+    }
+  }
+}

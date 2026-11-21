@@ -45,6 +45,7 @@ interface SectionBlockProps {
   activeModel: GeminiModel;
   isReprocessing: boolean;
   onUpdateContent: (sectionId: string, nextContent: string) => void;
+  onFlushContent?: (sectionId: string) => void;
   onSelectVersion: (sectionId: string, versionIndex: number) => void;
   onReprocessStyle: (
     section: ManuscriptSection,
@@ -61,6 +62,7 @@ export function SectionBlock({
   activeModel,
   isReprocessing,
   onUpdateContent,
+  onFlushContent,
   onSelectVersion,
   onReprocessStyle,
   onDeleteSection,
@@ -225,7 +227,7 @@ export function SectionBlock({
 
         {/* Section controls */}
         <div className="flex flex-wrap items-center gap-1">
-          {section.audioId && section.audioMeta ? (
+          {(section.audioUrl || section.audioId) && section.audioMeta ? (
             <button
               type="button"
               onClick={() => setShowAudio((prev) => !prev)}
@@ -351,10 +353,16 @@ export function SectionBlock({
         </div>
       </div>
 
-      {/* Optional persisted audio playback & backup bar */}
-      {showAudio && section.audioId && section.audioMeta ? (
+      {/* Optional persisted cloud/local audio playback & backup bar */}
+      {showAudio && (section.audioUrl || section.audioId) && section.audioMeta ? (
         <div className="mb-4">
-          <AudioPlayerBar audioId={section.audioId} meta={section.audioMeta} compact />
+          <AudioPlayerBar
+            audioUrl={section.audioUrl}
+            storagePath={section.storagePath}
+            audioId={section.audioId}
+            meta={section.audioMeta}
+            compact
+          />
         </div>
       ) : null}
 
@@ -364,6 +372,7 @@ export function SectionBlock({
           ref={textareaRef}
           value={activeVersion.text}
           onChange={handleTextChange}
+          onBlur={() => onFlushContent?.(section.id)}
           disabled={isReprocessing}
           rows={3}
           spellCheck={false}
