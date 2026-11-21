@@ -76,6 +76,8 @@ export enum OperationType {
 
 export interface FirestoreErrorInfo {
   error: string;
+  projectId: string;
+  databaseId: string;
   operationType: OperationType;
   path: string | null;
   authInfo: {
@@ -98,6 +100,8 @@ export function handleFirestoreError(
 ): never {
   const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
+    projectId: firebaseConfig.projectId,
+    databaseId: firestoreDatabaseId,
     authInfo: {
       userId: auth.currentUser?.uid,
       email: auth.currentUser?.email,

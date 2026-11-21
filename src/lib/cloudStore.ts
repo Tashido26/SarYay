@@ -761,15 +761,18 @@ export async function createSectionInCloud(
   }
 
   try {
-    const batch = writeBatch(db);
-    batch.set(doc(db, sectionPath), sectionPayload);
-    batch.update(doc(db, storyPath), {
+    await setDoc(doc(db, sectionPath), sectionPayload);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, sectionPath);
+  }
+
+  try {
+    await updateDoc(doc(db, storyPath), {
       sectionCount: Math.max(0, Math.min(5000, Math.floor(params.nextSectionCount))),
       updatedAt: serverTimestamp(),
     });
-    await batch.commit();
-  } catch (error) {
-    handleFirestoreError(error, OperationType.CREATE, sectionPath);
+  } catch (storyErr) {
+    console.warn('Section created, but parent story metadata update failed:', storyErr);
   }
 }
 
@@ -788,18 +791,21 @@ export async function updateSectionContentInCloud(
   assertSectionPayloadWithinLimit(cleanContent, cleanVersions);
 
   try {
-    const batch = writeBatch(db);
-    batch.update(doc(db, sectionPath), {
+    await updateDoc(doc(db, sectionPath), {
       content: cleanContent,
       versions: cleanVersions,
       updatedAt: serverTimestamp(),
     });
-    batch.update(doc(db, storyPath), {
-      updatedAt: serverTimestamp(),
-    });
-    await batch.commit();
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, sectionPath);
+  }
+
+  try {
+    await updateDoc(doc(db, storyPath), {
+      updatedAt: serverTimestamp(),
+    });
+  } catch (storyErr) {
+    console.warn('Section updated, but parent story timestamp touch failed:', storyErr);
   }
 }
 
@@ -815,8 +821,7 @@ export async function selectSectionVersionInCloud(
   const clean = sanitizeVersionForCloud(selectedVersion, activeVersionIndex);
 
   try {
-    const batch = writeBatch(db);
-    batch.update(doc(db, sectionPath), {
+    await updateDoc(doc(db, sectionPath), {
       content: clean.text,
       style: clean.style,
       refinedEnding: clean.refinedEnding,
@@ -824,12 +829,16 @@ export async function selectSectionVersionInCloud(
       activeVersionIndex: Math.max(0, Math.floor(activeVersionIndex)),
       updatedAt: serverTimestamp(),
     });
-    batch.update(doc(db, storyPath), {
-      updatedAt: serverTimestamp(),
-    });
-    await batch.commit();
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, sectionPath);
+  }
+
+  try {
+    await updateDoc(doc(db, storyPath), {
+      updatedAt: serverTimestamp(),
+    });
+  } catch (storyErr) {
+    console.warn('Section version selected, but parent story timestamp touch failed:', storyErr);
   }
 }
 
@@ -848,8 +857,7 @@ export async function appendSectionVersionInCloud(
   assertSectionPayloadWithinLimit(active.text, cleanVersions);
 
   try {
-    const batch = writeBatch(db);
-    batch.update(doc(db, sectionPath), {
+    await updateDoc(doc(db, sectionPath), {
       content: active.text,
       style: active.style,
       refinedEnding: active.refinedEnding,
@@ -858,12 +866,16 @@ export async function appendSectionVersionInCloud(
       activeVersionIndex,
       updatedAt: serverTimestamp(),
     });
-    batch.update(doc(db, storyPath), {
-      updatedAt: serverTimestamp(),
-    });
-    await batch.commit();
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, sectionPath);
+  }
+
+  try {
+    await updateDoc(doc(db, storyPath), {
+      updatedAt: serverTimestamp(),
+    });
+  } catch (storyErr) {
+    console.warn('Section version appended, but parent story timestamp touch failed:', storyErr);
   }
 }
 

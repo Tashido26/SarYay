@@ -325,18 +325,12 @@ service cloud.firestore {
       // Subcollection: /users/{userId}/stories/{storyId}/sections/{sectionId}
       // -----------------------------------------------------------------------
       match /sections/{sectionId} {
-        function parentStoryBelongsToOwner() {
-          return exists(/databases/$(database)/documents/users/$(userId)/stories/$(storyId))
-            && get(/databases/$(database)/documents/users/$(userId)/stories/$(storyId)).data.ownerId == request.auth.uid;
-        }
-
         allow get: if isAuthorizedOwner(userId)
           && isValidId(userId)
           && isValidId(storyId)
           && isValidId(sectionId)
           && existing().ownerId == request.auth.uid
-          && existing().storyId == storyId
-          && parentStoryBelongsToOwner();
+          && existing().storyId == storyId;
 
         // Pillar 8: Secure list query checking resource.data without get()/exists()
         allow list: if isAuthorizedOwner(userId)
@@ -351,8 +345,7 @@ service cloud.firestore {
           && (!('isDeleted' in incoming()) || incoming().isDeleted == false)
           && (!('deletedAt' in incoming()) || incoming().deletedAt == null)
           && incoming().createdAt == request.time
-          && incoming().updatedAt == request.time
-          && parentStoryBelongsToOwner();
+          && incoming().updatedAt == request.time;
 
         allow update: if isAuthorizedOwner(userId)
           && isValidId(userId)
@@ -366,7 +359,6 @@ service cloud.firestore {
           && incoming().order == existing().order
           && incoming().createdAt == existing().createdAt
           && incoming().updatedAt == request.time
-          && parentStoryBelongsToOwner()
           && (
             // Action: Edit active version prose text
             incoming().diff(existing()).affectedKeys().hasOnly(['content', 'versions', 'updatedAt'])
@@ -425,8 +417,7 @@ service cloud.firestore {
           && isValidId(storyId)
           && isValidId(sectionId)
           && existing().ownerId == request.auth.uid
-          && existing().storyId == storyId
-          && parentStoryBelongsToOwner();
+          && existing().storyId == storyId;
       }
     }
 
