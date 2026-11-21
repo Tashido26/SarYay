@@ -112,7 +112,108 @@ function getNextUntitledStoryTitle(stories: StorySession[]): string {
   return `Untitled Story ${maxNumber + 1}`;
 }
 
+function isInjectedNetlifyElement(el: Element): boolean {
+  if (el.id === 'root') return false;
+  const tag = el.tagName.toLowerCase();
+  if (tag === 'script' || tag === 'style' || tag === 'link' || tag === 'noscript') {
+    return false;
+  }
+
+  if (
+    el.hasAttribute('data-netlify-deploy-id') ||
+    tag.includes('netlify') ||
+    (el.id && el.id.toLowerCase().includes('netlify')) ||
+    (typeof el.className === 'string' && el.className.toLowerCase().includes('netlify'))
+  ) {
+    return true;
+  }
+
+  const checkRoot = (root: ParentNode): boolean => {
+    if (
+      root.querySelector(
+        '[data-netlify-deploy-id], iframe[src*="netlify"], a[href*="netlify.com"]',
+      )
+    ) {
+      return true;
+    }
+    const text = (root.textContent || '').toLowerCase();
+    if (text.includes('powered by netlify')) {
+      return true;
+    }
+    const descendants = root.querySelectorAll('*');
+    for (let i = 0; i < descendants.length; i++) {
+      const child = descendants[i];
+      if (child.shadowRoot && checkRoot(child.shadowRoot)) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  if (el.shadowRoot && checkRoot(el.shadowRoot)) {
+    return true;
+  }
+  return checkRoot(el);
+}
+
+function hideNetlifyElement(el: HTMLElement): void {
+  el.style.setProperty('display', 'none', 'important');
+  el.style.setProperty('visibility', 'hidden', 'important');
+  el.style.setProperty('opacity', '0', 'important');
+  el.style.setProperty('pointer-events', 'none', 'important');
+  el.setAttribute('aria-hidden', 'true');
+}
+
 export default function App() {
+  useEffect(() => {
+    if (typeof document === 'undefined' || !document.body) return;
+
+    const watchedSiblings = new WeakSet<Element>();
+    const siblingObservers: MutationObserver[] = [];
+
+    const scanBodyChildren = () => {
+      const children = Array.from(document.body.children);
+      for (const child of children) {
+        if (child.id === 'root') continue;
+        if (child instanceof HTMLElement && isInjectedNetlifyElement(child)) {
+          hideNetlifyElement(child);
+          continue;
+        }
+        // Watch non-#root injected wrapper containers in case Netlify hydrates content asynchronously
+        if (!watchedSiblings.has(child)) {
+          const tag = child.tagName.toLowerCase();
+          if (tag !== 'script' && tag !== 'style' && tag !== 'link') {
+            watchedSiblings.add(child);
+            const subObserver = new MutationObserver(() => {
+              if (child instanceof HTMLElement && isInjectedNetlifyElement(child)) {
+                hideNetlifyElement(child);
+                subObserver.disconnect();
+              }
+            });
+            subObserver.observe(child, { childList: true, subtree: true, attributes: true });
+            siblingObservers.push(subObserver);
+          }
+        }
+      }
+    };
+
+    scanBodyChildren();
+
+    const bodyObserver = new MutationObserver(scanBodyChildren);
+    bodyObserver.observe(document.body, { childList: true });
+
+    // Catch delayed Shadow DOM hydration after initial script injection
+    const t1 = window.setTimeout(scanBodyChildren, 600);
+    const t2 = window.setTimeout(scanBodyChildren, 2000);
+
+    return () => {
+      bodyObserver.disconnect();
+      for (const obs of siblingObservers) obs.disconnect();
+      window.clearTimeout(t1);
+      window.clearTimeout(t2);
+    };
+  }, []);
+
   return (
     <AuthGate>
       {({ user, onSignOut }) => <StudioWorkspace user={user} onSignOut={onSignOut} />}

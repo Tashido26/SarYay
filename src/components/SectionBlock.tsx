@@ -1,4 +1,4 @@
-import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   Check,
   ChevronDown,
@@ -90,36 +90,58 @@ export const SectionBlock = memo(function SectionBlock({
   const activeMode = activeVersion.mode ?? section.mode;
   const hasOriginalAudio = Boolean(section.storagePath || section.audioUrl || section.audioId);
 
-  const syncTextareaHeight = () => {
+  const syncTextareaMinHeight = useCallback(() => {
     const el = textareaRef.current;
     if (!el) return;
-    el.style.height = 'auto';
-    el.style.height = `${Math.max(96, el.scrollHeight)}px`;
-  };
+    // Let the CSS Grid mirror compute natural height first, then guard against any script-shaping delta
+    el.style.minHeight = '';
+    if (el.scrollHeight > el.clientHeight + 1) {
+      el.style.minHeight = `${el.scrollHeight + 4}px`;
+    }
+  }, []);
 
   useLayoutEffect(() => {
-    syncTextareaHeight();
-  }, [activeVersion.text, activeVersionIndex]);
+    syncTextareaMinHeight();
+  }, [activeVersion.text, activeVersionIndex, syncTextareaMinHeight]);
 
   useEffect(() => {
-    let resizeTimer: number | null = null;
-    const onResize = () => {
-      if (resizeTimer !== null) {
-        window.clearTimeout(resizeTimer);
-      }
-      resizeTimer = window.setTimeout(() => {
-        resizeTimer = null;
-        syncTextareaHeight();
-      }, 120);
+    const el = textareaRef.current;
+    if (!el) return;
+
+    let rafId: number | null = null;
+    const scheduleSync = () => {
+      if (rafId !== null) window.cancelAnimationFrame(rafId);
+      rafId = window.requestAnimationFrame(() => {
+        rafId = null;
+        syncTextareaMinHeight();
+      });
     };
-    window.addEventListener('resize', onResize);
+
+    // Re-check when container width changes (e.g. sidebar open/collapse, window resize, orientation change)
+    let observer: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(scheduleSync);
+      observer.observe(el);
+    }
+
+    // Re-check once web fonts (e.g. Noto Sans Myanmar) finish loading
+    let cancelled = false;
+    if (typeof document !== 'undefined' && document.fonts?.ready) {
+      void document.fonts.ready.then(() => {
+        if (!cancelled) scheduleSync();
+      });
+    }
+
+    window.addEventListener('resize', scheduleSync);
     return () => {
-      window.removeEventListener('resize', onResize);
-      if (resizeTimer !== null) {
-        window.clearTimeout(resizeTimer);
+      cancelled = true;
+      window.removeEventListener('resize', scheduleSync);
+      observer?.disconnect();
+      if (rafId !== null) {
+        window.cancelAnimationFrame(rafId);
       }
     };
-  }, []);
+  }, [syncTextareaMinHeight]);
 
   useEffect(() => {
     if (!menuOpen) {
@@ -412,19 +434,29 @@ export const SectionBlock = memo(function SectionBlock({
         </div>
       ) : null}
 
-      {/* Editable Burmese/English literary prose editor */}
-      <div className="rounded-lg transition-colors duration-150 focus-within:bg-[#FAFAFC]">
+      {/* Editable Burmese/English literary prose editor (CSS Grid mirror keeps all lines unclipped) */}
+      <div className="grid rounded-lg transition-colors duration-150 focus-within:bg-[#FAFAFC]">
+        <div
+          aria-hidden="true"
+          className="font-manuscript pointer-events-none invisible col-start-1 row-start-1 min-h-[96px] w-full whitespace-pre-wrap break-words rounded-lg border border-transparent px-2.5 pt-2 pb-3 text-[16.5px] [overflow-wrap:break-word]"
+        >
+          {`${activeVersion.text}\u200B`}
+        </div>
         <textarea
           ref={textareaRef}
           value={activeVersion.text}
           onChange={handleTextChange}
-          onBlur={() => onFlushContent?.(section.id)}
+          onFocus={syncTextareaMinHeight}
+          onBlur={() => {
+            syncTextareaMinHeight();
+            onFlushContent?.(section.id);
+          }}
           disabled={isReprocessing}
-          rows={3}
+          rows={1}
           spellCheck={false}
           aria-label={`Editable prose for section ${index + 1}, version ${activeVersionIndex + 1} of ${versions.length}`}
           placeholder="Your transcribed manuscript prose will appear here…"
-          className="font-manuscript block w-full resize-none overflow-hidden rounded-lg border border-transparent bg-transparent px-1 py-1.5 text-[16.5px] text-[#111827] placeholder:text-[#9CA3AF] focus:border-[#E5E7EB] focus:px-3 focus:outline-none disabled:opacity-60"
+          className="font-manuscript col-start-1 row-start-1 block h-full min-h-[96px] w-full resize-none overflow-hidden whitespace-pre-wrap break-words rounded-lg border border-transparent bg-transparent px-2.5 pt-2 pb-3 text-[16.5px] text-[#111827] placeholder:text-[#9CA3AF] [overflow-wrap:break-word] focus:border-[#E5E7EB] focus:outline-none disabled:opacity-60"
         />
       </div>
 

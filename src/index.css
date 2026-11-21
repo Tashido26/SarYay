@@ -128,3 +128,18 @@ input[type="range"].audio-scrubber::-moz-range-thumb {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Hide Netlify's injected floating badge / drawer so it never covers the Sticky Bottom Dock */
+div[data-netlify-deploy-id],
+[data-netlify-deploy-id],
+[id*="netlify-drawer"],
+[class*="netlify-drawer"],
+iframe[src*="netlify"],
+a[href*="netlify.com"][style*="fixed"],
+body > a[href*="netlify.com"],
+body > div:not(#root) a[href*="netlify.com"] {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
