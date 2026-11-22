@@ -6,7 +6,7 @@ import { GoogleGenAI } from '@google/genai';
 export type WritingStyle = 'colloquial' | 'literary' | 'refined_flow';
 export type VoiceEnding = 'colloquial' | 'literary';
 export type GeminiModel = 'gemini-2.5-flash' | 'gemini-2.5-pro';
-export type ProcessingMode = 'full_polish' | 'summarize_structure';
+export type ProcessingMode = 'full_polish' | 'summarize_structure' | 'proofread_only';
 
 export interface TokenUsage {
   inputTokens: number;
@@ -18,11 +18,28 @@ export interface TokenUsage {
 export const ALLOWED_MODELS = new Set<GeminiModel>(['gemini-2.5-flash', 'gemini-2.5-pro']);
 export const ALLOWED_STYLES = new Set<WritingStyle>(['colloquial', 'literary', 'refined_flow']);
 export const ALLOWED_ENDINGS = new Set<VoiceEnding>(['colloquial', 'literary']);
-export const ALLOWED_MODES = new Set<ProcessingMode>(['full_polish', 'summarize_structure']);
+export const ALLOWED_MODES = new Set<ProcessingMode>([
+  'full_polish',
+  'summarize_structure',
+  'proofread_only',
+]);
 export const INLINE_AUDIO_LIMIT_BYTES = Math.round(4.5 * 1024 * 1024); // 4.5 MB
 export const MAX_UPLOAD_BYTES = 60 * 1024 * 1024; // 60 MB
-export const MAX_RESTYLE_TEXT_CHARS = 200_000;
+export const MAX_RESTYLE_TEXT_CHARS = 120_000;
 export const MAX_GLOSSARY_LENGTH = 8_000;
+export const MAX_PREVIOUS_CONTEXT_CHARS = 1_600;
+const MAX_OUTPUT_TOKENS = 16_384;
+
+function buildGenerationConfig(model: GeminiModel, systemInstruction: string) {
+  return {
+    systemInstruction,
+    maxOutputTokens: MAX_OUTPUT_TOKENS,
+    thinkingConfig: {
+      // Strictly cap thinking tokens to prevent unbounded reasoning billing spikes
+      thinkingBudget: model === 'gemini-2.5-pro' ? 1024 : 0,
+    },
+  };
+}
 
 function computeTokenUsage(
   usageMetadata:
@@ -31,6 +48,10 @@ function computeTokenUsage(
         candidatesTokenCount?: number;
         thoughtsTokenCount?: number;
         totalTokenCount?: number;
+        promptTokensDetails?: Array<{
+          modality?: string;
+          tokenCount?: number;
+        }>;
       }
     | undefined,
   model: GeminiModel,
@@ -58,30 +79,50 @@ function computeTokenUsage(
     return undefined;
   }
 
-  let inputRatePerMillion = 0.3;
+  let inputCostUsd = 0;
   let outputRatePerMillion = 2.5;
 
   if (model === 'gemini-2.5-pro') {
     // Gemini 2.5 Pro pricing tier: <= 200k prompt tokens ($1.25 / $10.00), > 200k ($2.50 / $15.00)
-    if (inputTokens > 200_000) {
-      inputRatePerMillion = 2.5;
-      outputRatePerMillion = 15.0;
-    } else {
-      inputRatePerMillion = 1.25;
-      outputRatePerMillion = 10.0;
-    }
+    const inputRatePerMillion = inputTokens > 200_000 ? 2.5 : 1.25;
+    outputRatePerMillion = inputTokens > 200_000 ? 15.0 : 10.0;
+    inputCostUsd = (inputTokens / 1_000_000) * inputRatePerMillion;
   } else {
     // gemini-2.5-flash: $1.00 / 1M audio input, $0.30 / 1M text input, $2.50 / 1M output (incl. thinking)
-    inputRatePerMillion = inputKind === 'audio' ? 1.0 : 0.3;
     outputRatePerMillion = 2.5;
+    const details = Array.isArray(usageMetadata.promptTokensDetails)
+      ? usageMetadata.promptTokensDetails
+      : [];
+    if (inputKind === 'audio' && details.length > 0) {
+      let audioTokens = 0;
+      let textTokens = 0;
+      for (const item of details) {
+        const count = Math.max(0, Math.round(item?.tokenCount ?? 0));
+        if (count === 0) continue;
+        const modality = String(item?.modality ?? '').toUpperCase();
+        if (modality === 'AUDIO') {
+          audioTokens += count;
+        } else {
+          textTokens += count;
+        }
+      }
+      const accounted = audioTokens + textTokens;
+      if (accounted > 0) {
+        const remainder = Math.max(0, inputTokens - accounted);
+        inputCostUsd =
+          (audioTokens / 1_000_000) * 1.0 +
+          ((textTokens + remainder) / 1_000_000) * 0.3;
+      } else {
+        inputCostUsd = (inputTokens / 1_000_000) * 1.0;
+      }
+    } else {
+      const inputRatePerMillion = inputKind === 'audio' ? 1.0 : 0.3;
+      inputCostUsd = (inputTokens / 1_000_000) * inputRatePerMillion;
+    }
   }
 
-  const estimatedCostUsd = Number(
-    (
-      (inputTokens / 1_000_000) * inputRatePerMillion +
-      (outputTokens / 1_000_000) * outputRatePerMillion
-    ).toFixed(6),
-  );
+  const outputCostUsd = (outputTokens / 1_000_000) * outputRatePerMillion;
+  const estimatedCostUsd = Number((inputCostUsd + outputCostUsd).toFixed(6));
 
   return {
     inputTokens,
@@ -227,15 +268,37 @@ ${clean}
 </glossary>\n`;
 }
 
+function normalizePreviousContextInput(previousContext?: string): string {
+  if (typeof previousContext !== 'string') return '';
+  const trimmed = previousContext.trim();
+  if (!trimmed) return '';
+  return trimmed.length > MAX_PREVIOUS_CONTEXT_CHARS
+    ? trimmed.slice(-MAX_PREVIOUS_CONTEXT_CHARS).trim()
+    : trimmed;
+}
+
+function buildPreviousContextDirective(previousContext?: string): string {
+  const clean = normalizePreviousContextInput(previousContext);
+  if (!clean) return '';
+  return `\nPRECEDING PARAGRAPH CONTEXT (READ-ONLY CONTINUITY REFERENCE):
+Below is the tail of the previous manuscript section immediately before this recording. Use it ONLY to keep pronouns, Burmese honorifics (e.g. ကျွန်တော်/ကျွန်မ/ဦး/ဒေါ်/ကို/မ), character/place names, tense, and scene continuity seamless. NEVER repeat, rewrite, summarize, or include any part of this preceding context in your output — transcribe ONLY the new audio recording:
+<previous_context>
+${clean}
+</previous_context>\n`;
+}
+
 export function buildTranscriptionSystemInstruction(
   style: WritingStyle,
   mode: ProcessingMode,
   refinedEnding: VoiceEnding = 'colloquial',
   glossary?: string,
+  previousContext?: string,
 ): string {
   const styleStep = buildStylePreservationDirective(style, refinedEnding);
   const auditStep = buildFinalBurmeseAudit(style, refinedEnding);
   const glossaryBlock = buildGlossaryDirective(glossary);
+  const continuityBlock =
+    mode === 'summarize_structure' ? '' : buildPreviousContextDirective(previousContext);
 
   if (mode === 'summarize_structure') {
     return `You are an expert Burmese and English literary editor and lecture archivist working for writers, researchers, and listeners of literary talks (စာပေဟောပြောပွဲ) and long-form lectures.
@@ -270,7 +333,7 @@ ${buildRefinedFlowRules(refinedEnding)}
 - Organize into clean, natural paragraphs separated by blank lines without over-editing or rewriting.
 
 ${styleStep}
-${glossaryBlock}
+${glossaryBlock}${continuityBlock}
 ${auditStep}
 
 FINAL OUTPUT RULE:
@@ -289,7 +352,7 @@ STEP 1 — DEEP DE-CLUTTERING & REPETITION REMOVAL:
 
 ${styleStep}
 - NEVER summarize, shorten, omit, or condense any substantive ideas, scenes, storytelling details, or examples.
-${glossaryBlock}
+${glossaryBlock}${continuityBlock}
 ${auditStep}
 
 FINAL OUTPUT RULE:
@@ -302,9 +365,23 @@ export function buildRestyleSystemInstruction(
   refinedEnding: VoiceEnding = 'colloquial',
   glossary?: string,
 ): string {
+  const glossaryBlock = buildGlossaryDirective(glossary);
+
+  if (mode === 'proofread_only') {
+    return `You are a meticulous Burmese and English proofreader performing a STRICT PROOFREAD-ONLY pass.
+
+STRICT PROOFREAD-ONLY RULES (ZERO REWRITING):
+- Fix ONLY Burmese spelling and orthography errors (သတ်ပုံအမှား, အသတ်အမှား such as က်/တ်/ပ်/န်/မ်/င်, and context-dependent homophones such as "အိပ်မက်" vs "အိမ်မက်", "တတ်" vs "တက်", "ရွေ့" vs "ရွေး", dropped noun prefixes or clipped particles).
+- Fix English typos and capitalization errors.
+- Fix Burmese punctuation ("။" for sentence endings and "၊" for clause pauses) and tidy paragraph spacing cleanly.
+- STRICTLY PRESERVE the author's exact original word choices, sentence structure, spoken or literary endings, tone, and rhythm — DO NOT rewrite sentences, DO NOT convert between colloquial and literary styles, DO NOT summarize, and DO NOT add or remove ideas.
+${glossaryBlock}
+FINAL OUTPUT RULE:
+Return ONLY the proofread Burmese/English text with zero meta-commentary, explanations, or markdown code fences.`;
+  }
+
   const styleStep = buildStylePreservationDirective(style, refinedEnding);
   const auditStep = buildFinalBurmeseAudit(style, refinedEnding);
-  const glossaryBlock = buildGlossaryDirective(glossary);
   const structureDirective =
     mode === 'summarize_structure'
       ? 'Preserve the structured headings, thematic organization, and bullet takeaways cleanly.'
@@ -437,6 +514,7 @@ export async function transcribeAudioBuffer(params: {
   model: GeminiModel;
   mode: ProcessingMode;
   glossary?: string;
+  previousContext?: string;
 }): Promise<{
   text: string;
   style: WritingStyle;
@@ -476,7 +554,9 @@ export async function transcribeAudioBuffer(params: {
     params.mode,
     resolvedEnding,
     params.glossary,
+    params.previousContext,
   );
+  const generationConfig = buildGenerationConfig(params.model, systemInstruction);
   const userPrompt =
     params.mode === 'summarize_structure'
       ? 'Analyze the entire audio recording, produce a clean structured summary in the requested Burmese/English writing style, apply the mandatory final Burmese spelling and grammar audit, and return only the final polished text.'
@@ -507,9 +587,7 @@ export async function transcribeAudioBuffer(params: {
           contents: {
             parts: [audioPart, { text: userPrompt }],
           },
-          config: {
-            systemInstruction,
-          },
+          config: generationConfig,
         }),
       );
 
@@ -533,9 +611,7 @@ export async function transcribeAudioBuffer(params: {
         ai.models.generateContent({
           model: params.model,
           contents: [uploaded, userPrompt],
-          config: {
-            systemInstruction,
-          },
+          config: generationConfig,
         }),
       );
 
@@ -632,13 +708,12 @@ export async function restyleTextContent(params: {
     params.glossary,
   );
 
+  const generationConfig = buildGenerationConfig(params.model, systemInstruction);
   const response = await withRetry(() =>
     ai.models.generateContent({
       model: params.model,
       contents: cleanedText,
-      config: {
-        systemInstruction,
-      },
+      config: generationConfig,
     }),
   );
 

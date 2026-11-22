@@ -112,6 +112,41 @@ function getNextUntitledStoryTitle(stories: StorySession[]): string {
   return `Untitled Story ${maxNumber + 1}`;
 }
 
+const MAX_CONTINUITY_WORDS = 150;
+const MAX_CONTINUITY_CHARS = 1400;
+
+function extractPreviousParagraphContext(ordered: ManuscriptSection[]): string | undefined {
+  for (let i = ordered.length - 1; i >= 0; i -= 1) {
+    const raw = getActiveSectionVersion(ordered[i]).text.trim();
+    if (!raw) continue;
+
+    // Take trailing ~150 whitespace-separated tokens, then clamp cleanly for dense Burmese prose
+    const tokens = raw.split(/\s+/).filter(Boolean);
+    let tail =
+      tokens.length > MAX_CONTINUITY_WORDS
+        ? tokens.slice(-MAX_CONTINUITY_WORDS).join(' ')
+        : raw;
+
+    if (tail.length > MAX_CONTINUITY_CHARS) {
+      tail = tail.slice(-MAX_CONTINUITY_CHARS);
+      const breakIdx = Math.max(tail.indexOf('။'), tail.indexOf('\n'), tail.indexOf(' '));
+      if (breakIdx > 0 && breakIdx < 240) {
+        tail = tail.slice(breakIdx + 1);
+      }
+    }
+
+    const cleaned = tail.trim();
+    if (cleaned) return cleaned;
+  }
+  return undefined;
+}
+
+function getSectionOutlinePreview(text: string): string {
+  const singleLine = text.replace(/\s+/g, ' ').trim();
+  if (!singleLine) return 'Empty section';
+  return singleLine.length > 72 ? `${singleLine.slice(0, 72)}…` : singleLine;
+}
+
 export default function App() {
   return (
     <AuthGate>
@@ -166,6 +201,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   const titleDebounceRef = useRef<number | null>(null);
 
   const [glossaryOpen, setGlossaryOpen] = useState<boolean>(false);
+  const [outlineOpen, setOutlineOpen] = useState<boolean>(false);
   const [glossaryDraft, setGlossaryDraft] = useState<string>('');
   const [glossarySaveStatus, setGlossarySaveStatus] = useState<SectionSaveStatus>('saved');
   const glossaryDraftRef = useRef<string>('');
@@ -196,7 +232,9 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   const lastResumeSyncAtRef = useRef<number>(0);
   const resumeSyncInFlightRef = useRef<boolean>(false);
   const activeSessionIdRef = useRef<string>('');
+  const flushAllPendingEditsRef = useRef<(explicitStoryId?: string) => Promise<void>>(async () => {});
   const mainScrollRef = useRef<HTMLElement | null>(null);
+  const outlinePopoverRef = useRef<HTMLDivElement | null>(null);
   const pendingScrollSectionIdRef = useRef<string | null>(null);
   const bootstrappedRef = useRef<boolean>(false);
   const initialPurgeRanRef = useRef<boolean>(false);
@@ -341,12 +379,18 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'hidden') {
         lastHiddenAtRef.current = Date.now();
+        // Flush any debounced title, glossary, or section keystrokes before iOS PWA suspends
+        void flushAllPendingEditsRef.current(activeSessionIdRef.current);
       } else if (document.visibilityState === 'visible') {
         const hiddenDuration =
           lastHiddenAtRef.current > 0 ? Date.now() - lastHiddenAtRef.current : 0;
         lastHiddenAtRef.current = 0;
         runResumeSync(hiddenDuration >= 2500);
       }
+    };
+
+    const handlePageHide = () => {
+      void flushAllPendingEditsRef.current(activeSessionIdRef.current);
     };
 
     const handleWindowFocus = () => {
@@ -361,11 +405,13 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('pagehide', handlePageHide);
     window.addEventListener('focus', handleWindowFocus);
     window.addEventListener('online', handleOnline);
 
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('pagehide', handlePageHide);
       window.removeEventListener('focus', handleWindowFocus);
       window.removeEventListener('online', handleOnline);
     };
@@ -677,10 +723,33 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     }
   }, [activeSession?.id, activeSession?.glossary]);
 
-  // Collapse glossary drawer cleanly when changing stories
+  // Collapse glossary drawer and section outline cleanly when changing stories
   useEffect(() => {
     setGlossaryOpen(false);
+    setOutlineOpen(false);
   }, [activeSession?.id]);
+
+  // Dismiss section outline popover on outside click or Escape
+  useEffect(() => {
+    if (!outlineOpen) return;
+    const handlePointerDown = (e: MouseEvent | TouchEvent) => {
+      const target = e.target as Node | null;
+      if (outlinePopoverRef.current && target && !outlinePopoverRef.current.contains(target)) {
+        setOutlineOpen(false);
+      }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOutlineOpen(false);
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('touchstart', handlePointerDown, { passive: true });
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('touchstart', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [outlineOpen]);
 
   // Count non-empty glossary lines/items for the subtle toggle badge
   const glossaryEntryCount = useMemo(() => {
@@ -694,6 +763,15 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
 
   const handleScrollToTop = useCallback(() => {
     mainScrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+  }, []);
+
+  const handleJumpToSection = useCallback((sectionId: string) => {
+    setOutlineOpen(false);
+    const container = mainScrollRef.current;
+    const el = container?.querySelector<HTMLElement>(`[data-section-id="${sectionId}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
   }, []);
 
   // Merge any in-flight local typing drafts into displayed sections (unchanged sections keep ref identity for React.memo)
@@ -889,6 +967,10 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     },
     [flushTitleDraft, flushGlossaryDraft, flushSectionDraft],
   );
+
+  useEffect(() => {
+    flushAllPendingEditsRef.current = flushAllPendingEdits;
+  }, [flushAllPendingEdits]);
 
   const handleSelectStory = useCallback(
     (nextStoryId: string) => {
@@ -1201,6 +1283,10 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     const targetEnding = activeRefinedEnding;
     const targetModel = activeSession.defaultModel;
     const activeGlossary = (glossaryDraftRef.current || activeSession.glossary || '').trim();
+    const previousContext =
+      mode === 'summarize_structure'
+        ? undefined
+        : extractPreviousParagraphContext(orderedSections);
 
     // 1. Transcribe / polish via server-side Gemini API (returns text + exact usageMetadata)
     const result = await transcribeAudioApi({
@@ -1211,6 +1297,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       model: targetModel,
       mode,
       glossary: activeGlossary || undefined,
+      previousContext,
       signal,
     });
 
@@ -1330,38 +1417,45 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       targetStyle: WritingStyle,
       targetEnding?: VoiceEnding,
       source: ReprocessSource = 'text',
+      overrideMode?: ProcessingMode,
     ) => {
       const targetStoryId = activeSessionIdRef.current;
       if (!targetStoryId || reprocessingSectionIdRef.current) return;
-      await flushSectionDraft(section.id, targetStoryId);
-
-      setGlobalError(null);
+      // Lock synchronously before any async work to prevent fast double-click duplicate API calls
+      reprocessingSectionIdRef.current = section.id;
       setReprocessingSectionId(section.id);
-      const chosenModel = activeSession?.defaultModel ?? 'gemini-2.5-flash';
-      const sectionMode: ProcessingMode = section.mode ?? 'full_polish';
-      const resolvedEnding: VoiceEnding = targetEnding ?? activeRefinedEnding;
-      const currentActiveText = getActiveSectionVersion(section).text;
-      const activeGlossary = (glossaryDraftRef.current || activeSession?.glossary || '').trim();
+      setGlobalError(null);
 
       try {
+        await flushSectionDraft(section.id, targetStoryId);
+
+        const latestBeforeCall =
+          sectionsRef.current.find((s) => s.id === section.id) ?? section;
+        const chosenModel = activeSession?.defaultModel ?? 'gemini-2.5-flash';
+        const effectiveMode: ProcessingMode =
+          overrideMode ?? latestBeforeCall.mode ?? 'full_polish';
+        const resolvedEnding: VoiceEnding = targetEnding ?? activeRefinedEnding;
+        const currentActiveText = getActiveSectionVersion(latestBeforeCall).text;
+        const activeGlossary = (glossaryDraftRef.current || activeSession?.glossary || '').trim();
+
         let nextText = '';
         let nextUsage = undefined;
         let usedAudio = false;
 
-        if (source === 'audio') {
-          if (section.storagePath || section.audioUrl) {
+        if (source === 'audio' && effectiveMode !== 'proofread_only') {
+          if (latestBeforeCall.storagePath || latestBeforeCall.audioUrl) {
             const cloudBlob = await downloadSectionAudioBlob(
-              section.storagePath,
-              section.audioUrl,
+              latestBeforeCall.storagePath,
+              latestBeforeCall.audioUrl,
             );
             if (cloudBlob) {
               const result = await transcribeAudioApi({
                 blob: cloudBlob,
-                filename: section.audioMeta?.filename || 'recording.webm',
+                filename: latestBeforeCall.audioMeta?.filename || 'recording.webm',
                 style: targetStyle,
                 refinedEnding: resolvedEnding,
                 model: chosenModel,
-                mode: sectionMode,
+                mode: effectiveMode,
                 glossary: activeGlossary || undefined,
               });
               nextText = result.text;
@@ -1370,8 +1464,8 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
             }
           }
 
-          if (!usedAudio && section.audioId) {
-            const stored = await getAudioClip(section.audioId);
+          if (!usedAudio && latestBeforeCall.audioId) {
+            const stored = await getAudioClip(latestBeforeCall.audioId);
             if (stored?.blob) {
               const result = await transcribeAudioApi({
                 blob: stored.blob,
@@ -1379,7 +1473,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                 style: targetStyle,
                 refinedEnding: resolvedEnding,
                 model: chosenModel,
-                mode: sectionMode,
+                mode: effectiveMode,
                 glossary: activeGlossary || undefined,
               });
               nextText = result.text;
@@ -1394,13 +1488,13 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
             );
           }
         } else {
-          // Default: fast, low-cost text-only restyling (no Storage download or audio token cost)
+          // Fast, low-cost text-only restyling or strict Proofread Only pass
           const result = await restyleTextApi({
             text: currentActiveText,
             style: targetStyle,
             refinedEnding: resolvedEnding,
             model: chosenModel,
-            mode: sectionMode,
+            mode: effectiveMode,
             glossary: activeGlossary || undefined,
           });
           nextText = result.text;
@@ -1414,27 +1508,37 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
           style: targetStyle,
           refinedEnding: resolvedEnding,
           model: chosenModel,
-          mode: sectionMode,
+          mode: effectiveMode,
           timestamp: now,
           usage: nextUsage,
         };
 
-        const existingVersions = getSectionVersions(section);
-        const nextVersions = [...existingVersions, nextVersion];
+        // Re-read the freshest section state before appending and prune oldest intermediate versions if >= 50
+        const freshestSection =
+          sectionsRef.current.find((s) => s.id === section.id) ?? latestBeforeCall;
+        const existingVersions = getSectionVersions(freshestSection);
+        const combinedVersions = [...existingVersions, nextVersion];
+        const boundedVersions =
+          combinedVersions.length > 50
+            ? [combinedVersions[0], ...combinedVersions.slice(-49)]
+            : combinedVersions;
 
         await trackSync(() =>
-          appendSectionVersionInCloud(uid, targetStoryId, section.id, nextVersions),
+          appendSectionVersionInCloud(uid, targetStoryId, section.id, boundedVersions),
         );
 
         const styleDesc = formatCompactStyleLabel(targetStyle, resolvedEnding);
         showToast(
-          usedAudio
-            ? `Re-listened & saved as v${nextVersions.length} (${styleDesc})`
-            : `Saved as v${nextVersions.length} (${styleDesc})`,
+          effectiveMode === 'proofread_only'
+            ? `Proofread saved as v${boundedVersions.length}`
+            : usedAudio
+              ? `Re-listened & saved as v${boundedVersions.length} (${styleDesc})`
+              : `Saved as v${boundedVersions.length} (${styleDesc})`,
         );
       } catch (err) {
         setGlobalError(formatCloudErrorMessage(err));
       } finally {
+        reprocessingSectionIdRef.current = null;
         setReprocessingSectionId(null);
       }
     },
@@ -1603,7 +1707,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     return (
       <div className="safe-top safe-bottom flex h-[100dvh] w-full flex-col items-center justify-center bg-white px-6 text-[#111827]">
         <div className="flex flex-col items-center gap-3 text-center">
-          <Loader2 className="h-5 w-5 animate-spin text-[#4338CA]" aria-hidden="true" />
+          <Loader2 className="h-5 w-5 animate-spin text-[#312E81]" aria-hidden="true" />
           <p className="text-sm font-medium text-[#6B7280]">Loading your cloud stories…</p>
           {globalError && (
             <p className="mt-2 max-w-md rounded-lg border border-[#FECACA] bg-[#FEF2F2] px-4 py-2.5 text-xs text-[#991B1B]">
@@ -1662,7 +1766,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                     onClick={() => setSidebarOpen(true)}
                     aria-label="Open sidebar"
                     title="Open stories sidebar"
-                    className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[#4B5563] transition-colors duration-150 hover:bg-[#F3F4F6] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA]"
+                    className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[#4B5563] transition-colors duration-150 hover:bg-[#F3F4F6] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81]"
                   >
                     <PanelLeft className="h-4 w-4" />
                   </button>
@@ -1676,9 +1780,9 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                   }}
                   aria-label="Sync with cloud"
                   title="Sync latest changes from Firebase"
-                  className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors duration-150 hover:bg-[#F3F4F6] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-wait sm:h-9 sm:w-9 ${
+                  className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors duration-150 hover:bg-[#F3F4F6] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81] disabled:cursor-wait sm:h-9 sm:w-9 ${
                     isManualSyncing
-                      ? 'text-[#4338CA]'
+                      ? 'text-[#312E81]'
                       : syncPulseState === 'synced'
                         ? 'text-[#16A34A]'
                         : 'text-[#6B7280] hover:text-[#111827]'
@@ -1890,7 +1994,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                       <button
                         type="button"
                         onClick={() => handleSelectStory(suggestedResumeStory.id)}
-                        className="max-w-[280px] truncate rounded-lg bg-[#4338CA] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[#3730A3]"
+                        className="max-w-[280px] truncate rounded-lg bg-[#312E81] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[#27246A]"
                       >
                         Open {suggestedResumeStory.title || 'Untitled Story'}
                       </button>
@@ -1905,7 +2009,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                     >
                       {isCreatingStory ? (
                         <>
-                          <Loader2 className="h-3.5 w-3.5 animate-spin text-[#4338CA]" />
+                          <Loader2 className="h-3.5 w-3.5 animate-spin text-[#312E81]" />
                           <span>Creating…</span>
                         </>
                       ) : (
@@ -1936,7 +2040,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                       onClick={() => {
                         void handleCreateSession();
                       }}
-                      className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-[#4338CA] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[#3730A3] disabled:cursor-wait disabled:opacity-60"
+                      className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-[#312E81] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[#27246A] disabled:cursor-wait disabled:opacity-60"
                     >
                       {isCreatingStory ? (
                         <>
@@ -1975,10 +2079,70 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                 />
 
                 <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-[#6B7280] tabular-nums">
-                  <span>
-                    {orderedSections.length}{' '}
-                    {orderedSections.length === 1 ? 'section' : 'sections'}
-                  </span>
+                  {/* 1-Tap Section Outline Jump Popover */}
+                  {orderedSections.length > 0 ? (
+                    <div ref={outlinePopoverRef} className="relative">
+                      <button
+                        type="button"
+                        onClick={() => setOutlineOpen((prev) => !prev)}
+                        aria-expanded={outlineOpen}
+                        aria-haspopup="menu"
+                        title="Jump to any section in this story"
+                        className={`-ml-1.5 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81] ${
+                          outlineOpen
+                            ? 'bg-[#EEF2FF] text-[#312E81]'
+                            : 'text-[#4B5563] hover:bg-[#F3F4F6] hover:text-[#111827]'
+                        }`}
+                      >
+                        <span>
+                          {orderedSections.length}{' '}
+                          {orderedSections.length === 1 ? 'section' : 'sections'}
+                        </span>
+                        <ChevronDown
+                          className={`h-3 w-3 transition-transform duration-150 ${
+                            outlineOpen ? 'rotate-180 text-[#312E81]' : 'text-[#9CA3AF]'
+                          }`}
+                          aria-hidden="true"
+                        />
+                      </button>
+
+                      {outlineOpen && (
+                        <div
+                          role="menu"
+                          aria-label="Story section outline"
+                          className="absolute left-0 top-full z-30 mt-1.5 max-h-72 w-[min(320px,calc(100vw-40px))] overflow-y-auto rounded-xl border border-[#E5E7EB] bg-white py-1.5 shadow-[0_12px_32px_rgba(17,24,39,0.12)]"
+                        >
+                          <div className="px-3 py-1 text-[10px] font-medium uppercase tracking-wider text-[#9CA3AF]">
+                            Jump to section
+                          </div>
+                          {orderedSections.map((sec, idx) => {
+                            const previewText = getSectionOutlinePreview(
+                              getActiveSectionVersion(sec).text,
+                            );
+                            return (
+                              <button
+                                key={sec.id}
+                                type="button"
+                                role="menuitem"
+                                onClick={() => handleJumpToSection(sec.id)}
+                                className="flex w-full items-baseline gap-2.5 px-3 py-2 text-left transition-colors hover:bg-[#F8F9FA]"
+                              >
+                                <span className="shrink-0 font-mono text-[11px] font-semibold text-[#312E81] tabular-nums">
+                                  {String(idx + 1).padStart(2, '0')}
+                                </span>
+                                <span className="font-manuscript min-w-0 flex-1 truncate text-xs text-[#374151]">
+                                  {previewText}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <span>0 sections</span>
+                  )}
+
                   <span aria-hidden="true">·</span>
                   <span>{totalCharacters.toLocaleString()} characters</span>
                   <span aria-hidden="true" className="text-[#D1D5DB]">
@@ -1988,7 +2152,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                     type="button"
                     onClick={() => setGlossaryOpen((prev) => !prev)}
                     aria-expanded={glossaryOpen}
-                    className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] ${
+                    className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81] ${
                       glossaryOpen
                         ? 'bg-[#EEF2FF] text-[#312E81]'
                         : glossaryEntryCount > 0
@@ -2000,7 +2164,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                     <BookOpen className="h-3 w-3" aria-hidden="true" />
                     <span>Glossary</span>
                     {glossaryEntryCount > 0 && (
-                      <span className="text-[11px] text-[#4338CA]">({glossaryEntryCount})</span>
+                      <span className="text-[11px] text-[#312E81]">({glossaryEntryCount})</span>
                     )}
                     <ChevronDown
                       className={`h-3 w-3 transition-transform duration-150 ${
@@ -2026,7 +2190,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                     </>
                   )}
                   {isSyncing && (
-                    <span className="inline-flex items-center gap-1 text-[#4338CA] sm:hidden">
+                    <span className="inline-flex items-center gap-1 text-[#312E81] sm:hidden">
                       <span aria-hidden="true">·</span>
                       <span>Syncing…</span>
                     </span>
@@ -2046,7 +2210,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                       <span
                         className={`text-[11px] ${
                           glossarySaveStatus === 'saving'
-                            ? 'text-[#4338CA]'
+                            ? 'text-[#312E81]'
                             : glossarySaveStatus === 'error'
                               ? 'text-[#DC2626]'
                               : 'text-[#9CA3AF]'
@@ -2072,39 +2236,16 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                       rows={3}
                       maxLength={8000}
                       placeholder="e.g. ဦးမင်းသန့် (U Min Thant), မြစ်ကြီးနား, SarYay, အိပ်မက်"
-                      className="font-manuscript block w-full resize-y rounded-lg border border-[#E5E7EB] bg-white px-3 py-2 text-base text-[#111827] placeholder:text-[#9CA3AF] focus:border-[#4338CA] focus:outline-none sm:text-xs"
+                      className="font-manuscript block w-full resize-y rounded-lg border border-[#E5E7EB] bg-white px-3 py-2 text-base text-[#111827] placeholder:text-[#9CA3AF] focus:border-[#312E81] focus:outline-none sm:text-xs"
                     />
                   </div>
                 )}
               </div>
 
-              {/* Global error banner */}
-              {globalError && (
-                <div
-                  role="alert"
-                  className="mb-6 flex items-start justify-between gap-3 rounded-lg border border-[#FECACA] bg-[#FEF2F2] px-4 py-3 text-xs text-[#991B1B]"
-                >
-                  <div className="flex min-w-0 flex-1 items-start gap-2.5">
-                    <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-[#DC2626]" />
-                    <p className="min-w-0 flex-1 break-words leading-relaxed [overflow-wrap:anywhere]">
-                      {globalError}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setGlobalError(null)}
-                    aria-label="Dismiss error"
-                    className="shrink-0 rounded p-0.5 text-[#991B1B] hover:bg-[#FEE2E2]"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              )}
-
               {/* Loading sections state */}
               {!sectionsLoaded && orderedSections.length === 0 ? (
                 <div className="flex items-center gap-2 py-8 text-xs text-[#6B7280]">
-                  <Loader2 className="h-3.5 w-3.5 animate-spin text-[#4338CA]" />
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-[#312E81]" />
                   <span>Syncing sections…</span>
                 </div>
               ) : orderedSections.length === 0 ? (
@@ -2143,6 +2284,31 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
             </div>
           )}
         </main>
+
+        {/* Always-visible error banner anchored right above the Sticky Bottom Dock when a story is open */}
+        {activeView === 'story' && activeSession && globalError && (
+          <div className="shrink-0 bg-white px-3 pt-2 sm:px-6">
+            <div
+              role="alert"
+              className="mx-auto flex max-w-3xl items-start justify-between gap-2.5 rounded-xl border border-[#FECACA] bg-[#FEF2F2] px-3.5 py-2.5 text-xs text-[#991B1B]"
+            >
+              <div className="flex min-w-0 flex-1 items-start gap-2">
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-[#DC2626]" />
+                <p className="min-w-0 flex-1 break-words leading-relaxed [overflow-wrap:anywhere]">
+                  {globalError}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setGlobalError(null)}
+                aria-label="Dismiss error"
+                className="shrink-0 rounded p-0.5 text-[#991B1B] hover:bg-[#FEE2E2]"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Sleek Sticky Bottom Dictation Dock anchored cleanly to bottom of viewport */}
         {activeView === 'story' && activeSession && (

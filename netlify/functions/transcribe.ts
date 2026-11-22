@@ -41,6 +41,8 @@ export default async (req: Request): Promise<Response> => {
     const mode = String(formData.get('mode') || 'full_polish') as ProcessingMode;
     const glossaryEntry = formData.get('glossary');
     const glossary = typeof glossaryEntry === 'string' ? glossaryEntry : undefined;
+    const prevContextEntry = formData.get('previousContext');
+    const previousContext = typeof prevContextEntry === 'string' ? prevContextEntry : undefined;
 
     const result = await transcribeAudioBuffer({
       buffer,
@@ -54,6 +56,7 @@ export default async (req: Request): Promise<Response> => {
       model,
       mode,
       glossary,
+      previousContext,
     });
 
     return Response.json(result, { status: 200 });

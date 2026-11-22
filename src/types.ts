@@ -4,7 +4,7 @@ export type VoiceEnding = 'colloquial' | 'literary';
 
 export type GeminiModel = 'gemini-2.5-flash' | 'gemini-2.5-pro';
 
-export type ProcessingMode = 'full_polish' | 'summarize_structure';
+export type ProcessingMode = 'full_polish' | 'summarize_structure' | 'proofread_only';
 
 export type ReprocessSource = 'text' | 'audio';
 
@@ -119,12 +119,15 @@ export const ENDING_LABELS: Record<VoiceEnding, string> = {
 export const MODE_LABELS: Record<ProcessingMode, string> = {
   full_polish: 'Full Polish (Clean Text)',
   summarize_structure: 'Summarize & Structure',
+  proofread_only: 'Proofread Only',
 };
 
 export const MODE_DESCRIPTIONS: Record<ProcessingMode, string> = {
   full_polish: 'Complete transcription without summarizing — preserves 100% of ideas and details',
   summarize_structure:
     'Structured summary with clear sections and key takeaways for long lectures and talks',
+  proofread_only:
+    'Strictly fixes Burmese spelling, punctuation (၊ ။), and paragraph spacing without altering your phrasing',
 };
 
 export const MODEL_LABELS: Record<GeminiModel, string> = {

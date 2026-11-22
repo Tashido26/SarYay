@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Download, Loader2, Pause, Play, Volume2 } from 'lucide-react';
+import { AlertCircle, Download, Loader2, Pause, Play, Volume2 } from 'lucide-react';
 import type { AudioMeta } from '../types.ts';
 import { getAudioClip } from '../lib/audioDb.ts';
 import { downloadSectionAudioBlob } from '../lib/cloudStore.ts';
@@ -35,6 +35,7 @@ export function AudioPlayerBar({
   );
   const [downloading, setDownloading] = useState(false);
   const [missingClip, setMissingClip] = useState<boolean>(false);
+  const [playbackError, setPlaybackError] = useState<string | null>(null);
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [isBuffering, setIsBuffering] = useState(false);
@@ -42,6 +43,7 @@ export function AudioPlayerBar({
   const [duration, setDuration] = useState(meta.durationSec || 0);
 
   useEffect(() => {
+    setPlaybackError(null);
     if (directUrl && directBlob) {
       setResolvedUrl(directUrl);
       setResolvedBlob(directBlob);
@@ -120,12 +122,16 @@ export function AudioPlayerBar({
     const onPlaying = () => {
       setIsPlaying(true);
       setIsBuffering(false);
+      setPlaybackError(null);
     };
     const onWaiting = () => setIsBuffering(true);
     const onCanPlay = () => setIsBuffering(false);
     const onError = () => {
       setIsPlaying(false);
       setIsBuffering(false);
+      setPlaybackError(
+        'Could not play this audio format in this browser. You can still download the raw audio file.',
+      );
     };
 
     audio.addEventListener('timeupdate', onTimeUpdate);
@@ -154,6 +160,7 @@ export function AudioPlayerBar({
   const togglePlay = async () => {
     const audio = audioRef.current;
     if (!audio || !resolvedUrl) return;
+    setPlaybackError(null);
     if (isPlaying) {
       audio.pause();
     } else {
@@ -164,6 +171,15 @@ export function AudioPlayerBar({
         await audio.play();
       } catch (err) {
         setIsBuffering(false);
+        setIsPlaying(false);
+        const domErr = err as { name?: string };
+        if (domErr?.name === 'NotSupportedError') {
+          setPlaybackError(
+            'This audio format is not supported for playback on this device. Use Download to save a copy.',
+          );
+        } else {
+          setPlaybackError('Audio playback could not start. Please try again or download the clip.');
+        }
         console.warn('Audio playback blocked or failed:', err);
       }
     }
@@ -227,68 +243,80 @@ export function AudioPlayerBar({
 
   return (
     <div
-      className={`flex flex-wrap items-center gap-3 rounded-lg border border-[#E5E7EB] bg-[#F8F9FA] ${
+      className={`rounded-lg border border-[#E5E7EB] bg-[#F8F9FA] ${
         compact ? 'px-3 py-2' : 'px-4 py-3'
       }`}
     >
-      <audio ref={audioRef} src={resolvedUrl} preload="none" playsInline />
+      <div className="flex flex-wrap items-center gap-3">
+        <audio ref={audioRef} src={resolvedUrl} preload="metadata" playsInline />
 
-      <button
-        type="button"
-        onClick={togglePlay}
-        aria-label={isPlaying ? 'Pause audio' : 'Play audio'}
-        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#4338CA] text-white transition-colors duration-150 hover:bg-[#3730A3] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA]"
-      >
-        {isBuffering ? (
-          <Loader2 className="h-4 w-4 animate-spin" />
-        ) : isPlaying ? (
-          <Pause className="h-4 w-4" />
-        ) : (
-          <Play className="ml-0.5 h-4 w-4" />
-        )}
-      </button>
-
-      <div className="min-w-[160px] flex-1">
-        <div className="mb-1 flex items-center justify-between gap-2 text-xs text-[#6B7280]">
-          <span className="truncate font-medium text-[#374151]" title={meta.filename}>
-            {meta.filename}
-          </span>
-          <span className="shrink-0 font-mono text-[11px] tabular-nums text-[#6B7280]">
-            {formatDuration(currentTime)} / {formatDuration(duration)}
-          </span>
-        </div>
-        <input
-          type="range"
-          min={0}
-          max={maxSeek}
-          step={0.1}
-          value={Math.min(currentTime, maxSeek)}
-          onChange={handleSeek}
-          aria-label="Audio playback position"
-          className="audio-scrubber block w-full"
-        />
-      </div>
-
-      <div className="flex shrink-0 items-center gap-3">
-        <span className="hidden text-xs tabular-nums text-[#6B7280] sm:inline">
-          {formatFileSize(meta.sizeBytes)}
-        </span>
         <button
           type="button"
-          disabled={downloading}
-          onClick={handleDownload}
-          className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border border-[#E5E7EB] bg-white px-2.5 py-1.5 text-xs font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:opacity-60 sm:px-3"
-          title="Download audio backup locally"
+          onClick={togglePlay}
+          aria-label={isPlaying ? 'Pause audio' : 'Play audio'}
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#312E81] text-white transition-colors duration-150 hover:bg-[#27246A] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81]"
         >
-          {downloading ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          {isBuffering ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : isPlaying ? (
+            <Pause className="h-4 w-4" />
           ) : (
-            <Download className="h-3.5 w-3.5" />
+            <Play className="ml-0.5 h-4 w-4" />
           )}
-          <span className="hidden sm:inline">Download Audio</span>
-          <span className="sm:hidden">Download</span>
         </button>
+
+        <div className="min-w-[160px] flex-1">
+          <div className="mb-1 flex items-center justify-between gap-2 text-xs text-[#6B7280]">
+            <span className="truncate font-medium text-[#374151]" title={meta.filename}>
+              {meta.filename}
+            </span>
+            <span className="shrink-0 font-mono text-[11px] tabular-nums text-[#6B7280]">
+              {formatDuration(currentTime)} / {formatDuration(duration)}
+            </span>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={maxSeek}
+            step={0.1}
+            value={Math.min(currentTime, maxSeek)}
+            onChange={handleSeek}
+            aria-label="Audio playback position"
+            className="audio-scrubber block w-full"
+          />
+        </div>
+
+        <div className="flex shrink-0 items-center gap-3">
+          <span className="hidden text-xs tabular-nums text-[#6B7280] sm:inline">
+            {formatFileSize(meta.sizeBytes)}
+          </span>
+          <button
+            type="button"
+            disabled={downloading}
+            onClick={handleDownload}
+            className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border border-[#E5E7EB] bg-white px-2.5 py-1.5 text-xs font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81] disabled:opacity-60 sm:px-3"
+            title="Download audio backup locally"
+          >
+            {downloading ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Download className="h-3.5 w-3.5" />
+            )}
+            <span className="hidden sm:inline">Download Audio</span>
+            <span className="sm:hidden">Download</span>
+          </button>
+        </div>
       </div>
+
+      {playbackError && (
+        <div
+          role="alert"
+          className="mt-2 flex items-start gap-1.5 rounded-md border border-[#FECACA] bg-[#FEF2F2] px-2.5 py-1.5 text-[11px] leading-snug text-[#991B1B]"
+        >
+          <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#DC2626]" />
+          <span>{playbackError}</span>
+        </div>
+      )}
     </div>
   );
 }

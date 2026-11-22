@@ -141,6 +141,7 @@ export function DictationDock({
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [isMobileTyping, setIsMobileTyping] = useState(false);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -150,8 +151,10 @@ export function DictationDock({
   const segmentStartTimeRef = useRef<number>(0);
   const wakeLockRef = useRef<WakeLockSentinelLike | null>(null);
   const isRecordingRef = useRef<boolean>(false);
+  const isTranscribingRef = useRef<boolean>(false);
   const isPausedRef = useRef<boolean>(false);
   const storyIdRef = useRef<string>(storyId);
+  const mobileBlurTimerRef = useRef<number | null>(null);
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -172,8 +175,69 @@ export function DictationDock({
   }, [isRecording]);
 
   useEffect(() => {
+    isTranscribingRef.current = isTranscribing;
+  }, [isTranscribing]);
+
+  useEffect(() => {
     isPausedRef.current = isPaused;
   }, [isPaused]);
+
+  // Hide idle bottom dock while typing in an input/textarea on mobile (< 1024px) for maximum writing room
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const isTextEditableTarget = (el: EventTarget | null): boolean => {
+      if (!(el instanceof HTMLElement)) return false;
+      const tag = el.tagName;
+      if (tag === 'TEXTAREA') return true;
+      if (tag === 'INPUT') {
+        const type = ((el as HTMLInputElement).type || 'text').toLowerCase();
+        return !['button', 'checkbox', 'radio', 'range', 'file', 'submit', 'reset'].includes(type);
+      }
+      return el.isContentEditable;
+    };
+
+    const handleFocusIn = (e: FocusEvent) => {
+      if (window.innerWidth >= 1024) return;
+      if (isTextEditableTarget(e.target)) {
+        if (mobileBlurTimerRef.current !== null) {
+          window.clearTimeout(mobileBlurTimerRef.current);
+          mobileBlurTimerRef.current = null;
+        }
+        setIsMobileTyping(true);
+      }
+    };
+
+    const handleFocusOut = () => {
+      if (mobileBlurTimerRef.current !== null) {
+        window.clearTimeout(mobileBlurTimerRef.current);
+      }
+      mobileBlurTimerRef.current = window.setTimeout(() => {
+        mobileBlurTimerRef.current = null;
+        const active = document.activeElement;
+        if (window.innerWidth >= 1024 || !isTextEditableTarget(active)) {
+          setIsMobileTyping(false);
+        }
+      }, 120);
+    };
+
+    const handleResize = () => {
+      if (window.innerWidth >= 1024) {
+        setIsMobileTyping(false);
+      }
+    };
+
+    document.addEventListener('focusin', handleFocusIn);
+    document.addEventListener('focusout', handleFocusOut);
+    window.addEventListener('resize', handleResize);
+    return () => {
+      document.removeEventListener('focusin', handleFocusIn);
+      document.removeEventListener('focusout', handleFocusOut);
+      window.removeEventListener('resize', handleResize);
+      if (mobileBlurTimerRef.current !== null) {
+        window.clearTimeout(mobileBlurTimerRef.current);
+      }
+    };
+  }, []);
 
   // Dismiss upward settings popover on outside click or Escape
   useEffect(() => {
@@ -290,7 +354,8 @@ export function DictationDock({
   // Restore any unsent local IndexedDB audio draft for the opened story
   useEffect(() => {
     let cancelled = false;
-    if (isRecordingRef.current) return;
+    // Never wipe staged audio or recovery state while actively recording or transcribing
+    if (isRecordingRef.current || isTranscribingRef.current) return;
 
     if (stagedUrlRef.current) {
       URL.revokeObjectURL(stagedUrlRef.current);
@@ -305,7 +370,14 @@ export function DictationDock({
     if (!storyId) return;
 
     void getPendingDraftAudio(storyId).then((draft) => {
-      if (cancelled || !draft || !draft.blob || draft.blob.size === 0 || isRecordingRef.current) {
+      if (
+        cancelled ||
+        !draft ||
+        !draft.blob ||
+        draft.blob.size === 0 ||
+        isRecordingRef.current ||
+        isTranscribingRef.current
+      ) {
         return;
       }
       const objectUrl = URL.createObjectURL(draft.blob);
@@ -596,9 +668,9 @@ export function DictationDock({
 
     try {
       if (recorder.state === 'recording' && typeof recorder.pause === 'function') {
+        recorder.pause();
         accumulatedDurationMsRef.current += Math.max(0, Date.now() - segmentStartTimeRef.current);
         setElapsedSeconds(accumulatedDurationMsRef.current / 1000);
-        recorder.pause();
         if (audioContextRef.current && audioContextRef.current.state === 'running') {
           audioContextRef.current.suspend().catch(() => undefined);
         }
@@ -698,9 +770,10 @@ export function DictationDock({
   };
 
   const handleTranscribeClick = async () => {
-    if (!stagedAudio || isTranscribing) return;
+    if (!stagedAudio || isTranscribingRef.current) return;
     setErrorMessage(null);
     setSettingsOpen(false);
+    isTranscribingRef.current = true;
     setIsTranscribing(true);
 
     const effectiveMode: ProcessingMode =
@@ -727,6 +800,7 @@ export function DictationDock({
       }
     } finally {
       abortControllerRef.current = null;
+      isTranscribingRef.current = false;
       setIsTranscribing(false);
     }
   };
@@ -738,11 +812,19 @@ export function DictationDock({
   };
 
   const isUploadSummary = stagedAudio?.source === 'upload' && uploadMode === 'summarize_structure';
-  const compactStyleText =
+  const mobileStyleText =
+    style === 'refined_flow'
+      ? refinedEnding === 'literary'
+        ? 'Refined Lit'
+        : 'Refined Spk'
+      : STYLE_SHORT_LABELS[style];
+  const desktopStyleText =
     style === 'refined_flow'
       ? `Refined (${refinedEnding === 'literary' ? 'Literary' : 'Spoken'})`
       : STYLE_SHORT_LABELS[style];
   const compactModelText = MODEL_SHORT_LABELS[model];
+  const hideForMobileKeyboard =
+    isMobileTyping && !isRecording && !stagedAudio && !isTranscribing && !settingsOpen && !errorMessage;
 
   const renderSettingsTriggerAndPopover = (compactWidthClass = 'max-w-[46%] sm:max-w-none') => (
     <div ref={settingsPopoverRef} className={`relative min-w-0 ${compactWidthClass}`}>
@@ -866,14 +948,17 @@ export function DictationDock({
         aria-haspopup="dialog"
         onClick={() => setSettingsOpen((prev) => !prev)}
         title={`${formatStyleWithEnding(style, refinedEnding)} · ${MODEL_LABELS[model]} — Tap to change`}
-        className={`inline-flex h-10 max-w-full items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81] disabled:opacity-60 ${
+        className={`inline-flex h-10 max-w-full items-center gap-1 rounded-full border px-2.5 text-xs font-medium transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81] disabled:opacity-60 sm:gap-1.5 sm:px-3 ${
           settingsOpen
             ? 'border-[#312E81]/35 bg-[#EEF2FF] text-[#312E81]'
             : 'border-[#E5E7EB] bg-[#F8F9FA] text-[#374151] hover:border-[#D1D5DB] hover:bg-[#F3F4F6] hover:text-[#111827]'
         }`}
       >
-        <span className="truncate whitespace-nowrap">
-          {compactStyleText} · {compactModelText}
+        <span className="whitespace-nowrap sm:hidden">
+          {mobileStyleText} · {compactModelText}
+        </span>
+        <span className="hidden truncate whitespace-nowrap sm:inline">
+          {desktopStyleText} · {compactModelText}
         </span>
         <ChevronUp
           className={`h-3.5 w-3.5 shrink-0 text-[#6B7280] transition-transform duration-150 ${
@@ -884,6 +969,10 @@ export function DictationDock({
       </button>
     </div>
   );
+
+  if (hideForMobileKeyboard) {
+    return null;
+  }
 
   return (
     <div className="ios-crisp-dock safe-bottom-dock relative z-30 shrink-0 border-t border-[#E5E7EB] bg-white px-3 pt-2 shadow-[0_-4px_20px_rgba(17,24,39,0.05)] sm:border-t-0 sm:bg-white sm:px-6 sm:pb-4 sm:pt-2 sm:shadow-none">

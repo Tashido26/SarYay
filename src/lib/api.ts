@@ -44,6 +44,7 @@ export async function transcribeAudioApi(params: {
   model: GeminiModel;
   mode?: ProcessingMode;
   glossary?: string;
+  previousContext?: string;
   signal?: AbortSignal;
 }): Promise<TranscribeResponse> {
   const idToken = await getAuthIdToken();
@@ -58,6 +59,9 @@ export async function transcribeAudioApi(params: {
   formData.append('mode', params.mode ?? 'full_polish');
   if (params.glossary && params.glossary.trim()) {
     formData.append('glossary', params.glossary.trim());
+  }
+  if (params.previousContext && params.previousContext.trim()) {
+    formData.append('previousContext', params.previousContext.trim());
   }
 
   const response = await fetch('/api/transcribe', {

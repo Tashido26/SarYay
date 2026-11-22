@@ -9,6 +9,7 @@ import {
   getDocFromServer,
   getDocs,
   getDocsFromServer,
+  increment,
   limit,
   onSnapshot,
   orderBy,
@@ -44,6 +45,7 @@ import type {
   WritingStyle,
 } from '../types.ts';
 import { getActiveVersionIndex, getSectionVersions } from '../types.ts';
+import { deleteAudioClip, deleteAudioClips, deletePendingDraftAudio } from './audioDb.ts';
 import { OperationType, db, handleFirestoreError, storage } from './firebase.ts';
 import { extensionFromMimeType, isTrashItemExpired } from './format.ts';
 import { createId } from './storage.ts';
@@ -134,7 +136,8 @@ function normalizeModel(raw: unknown): GeminiModel {
 }
 
 function normalizeMode(raw: unknown): ProcessingMode {
-  return raw === 'summarize_structure' ? 'summarize_structure' : 'full_polish';
+  if (raw === 'summarize_structure' || raw === 'proofread_only') return raw;
+  return 'full_polish';
 }
 
 function parseUsage(raw: unknown): TokenUsage | undefined {
@@ -236,7 +239,7 @@ function parseStoryDoc(id: string, data: Record<string, unknown>): StorySession 
     defaultStyle: normalizeStyle(data.defaultStyle),
     defaultRefinedEnding: normalizeEnding(data.defaultRefinedEnding),
     defaultModel: normalizeModel(data.defaultModel),
-    sectionCount: typeof data.sectionCount === 'number' ? data.sectionCount : 0,
+    sectionCount: typeof data.sectionCount === 'number' ? Math.max(0, data.sectionCount) : 0,
     glossary: typeof data.glossary === 'string' ? data.glossary : '',
     isDeleted: data.isDeleted === true,
     deletedAt: optionalTimestampToIso(data.deletedAt),
@@ -768,7 +771,7 @@ export async function createSectionInCloud(
 
   try {
     await updateDoc(doc(db, storyPath), {
-      sectionCount: Math.max(0, Math.min(5000, Math.floor(params.nextSectionCount))),
+      sectionCount: increment(1),
       updatedAt: serverTimestamp(),
     });
   } catch (storyErr) {
@@ -826,6 +829,7 @@ export async function selectSectionVersionInCloud(
       style: clean.style,
       refinedEnding: clean.refinedEnding,
       model: clean.model,
+      mode: clean.mode,
       activeVersionIndex: Math.max(0, Math.floor(activeVersionIndex)),
       updatedAt: serverTimestamp(),
     });
@@ -862,6 +866,7 @@ export async function appendSectionVersionInCloud(
       style: active.style,
       refinedEnding: active.refinedEnding,
       model: active.model,
+      mode: active.mode,
       versions: cleanVersions,
       activeVersionIndex,
       updatedAt: serverTimestamp(),
@@ -962,7 +967,7 @@ export async function moveSectionToTrashInCloud(
       updatedAt: serverTimestamp(),
     });
     batch.update(doc(db, storyPath), {
-      sectionCount: Math.max(0, Math.min(5000, Math.floor(nextActiveSectionCount))),
+      sectionCount: increment(-1),
       updatedAt: serverTimestamp(),
     });
     batch.set(doc(db, trashPath), trashPayload);
@@ -1004,7 +1009,6 @@ export async function restoreSectionFromTrashInCloud(
     try {
       const existingSnap = await getDoc(doc(db, originalSectionPath));
       if (existingSnap.exists()) {
-        const nextCount = (parentStory.sectionCount ?? 0) + 1;
         const batch = writeBatch(db);
         batch.update(doc(db, originalSectionPath), {
           isDeleted: false,
@@ -1012,7 +1016,7 @@ export async function restoreSectionFromTrashInCloud(
           updatedAt: serverTimestamp(),
         });
         batch.update(doc(db, parentStoryPath), {
-          sectionCount: Math.max(0, Math.min(5000, nextCount)),
+          sectionCount: increment(1),
           updatedAt: serverTimestamp(),
         });
         batch.delete(doc(db, trashPath));
@@ -1088,7 +1092,7 @@ export async function restoreSectionFromTrashInCloud(
     const batch = writeBatch(db);
     batch.set(doc(db, restoredSectionPath), payload);
     batch.update(doc(db, targetStoryPath), {
-      sectionCount: Math.max(0, Math.min(5000, targetSectionCount)),
+      sectionCount: increment(1),
       updatedAt: serverTimestamp(),
     });
     batch.delete(doc(db, trashPath));
@@ -1131,6 +1135,11 @@ export async function permanentlyDeleteSectionFromTrashInCloud(
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, trashPath);
   }
+
+  // 4. Clean up local IndexedDB audio clip so deleted sections never bloat browser storage
+  if (trashed.audioId) {
+    await deleteAudioClip(trashed.audioId).catch(() => undefined);
+  }
 }
 
 export async function permanentlyDeleteStoryInCloud(uid: string, storyId: string): Promise<void> {
@@ -1150,12 +1159,18 @@ export async function permanentlyDeleteStoryInCloud(uid: string, storyId: string
   }
 
   const storagePathsToDelete: string[] = [];
+  const localAudioIdsToDelete: string[] = [];
   for (const secSnap of sectionDocs.docs) {
     const data = secSnap.data();
     const isIndividuallyTrashed = data.isDeleted === true;
-    // Preserve Storage audio for sections that are independently tracked in trashedSections
-    if (!isIndividuallyTrashed && typeof data.storagePath === 'string' && data.storagePath.trim()) {
-      storagePathsToDelete.push(data.storagePath.trim());
+    // Preserve audio for sections that are independently tracked in trashedSections
+    if (!isIndividuallyTrashed) {
+      if (typeof data.storagePath === 'string' && data.storagePath.trim()) {
+        storagePathsToDelete.push(data.storagePath.trim());
+      }
+      if (typeof data.audioId === 'string' && data.audioId.trim()) {
+        localAudioIdsToDelete.push(data.audioId.trim());
+      }
     }
   }
 
@@ -1185,6 +1200,12 @@ export async function permanentlyDeleteStoryInCloud(uid: string, storyId: string
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, storyPath);
   }
+
+  // 4. Clean up all local IndexedDB section audio clips & any pending draft audio for this story
+  await Promise.allSettled([
+    localAudioIdsToDelete.length > 0 ? deleteAudioClips(localAudioIdsToDelete) : Promise.resolve(),
+    deletePendingDraftAudio(storyId),
+  ]);
 }
 
 export async function purgeExpiredTrashInCloud(

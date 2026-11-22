@@ -70,6 +70,8 @@ async function startServer(): Promise<void> {
         const model = String(req.body?.model || 'gemini-2.5-flash') as GeminiModel;
         const mode = String(req.body?.mode || 'full_polish') as ProcessingMode;
         const glossary = typeof req.body?.glossary === 'string' ? req.body.glossary : undefined;
+        const previousContext =
+          typeof req.body?.previousContext === 'string' ? req.body.previousContext : undefined;
 
         const result = await transcribeAudioBuffer({
           buffer: file.buffer,
@@ -80,6 +82,7 @@ async function startServer(): Promise<void> {
           model,
           mode,
           glossary,
+          previousContext,
         });
 
         res.json(result);

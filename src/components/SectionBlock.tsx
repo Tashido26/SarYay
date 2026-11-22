@@ -8,11 +8,13 @@ import {
   Headphones,
   Loader2,
   RefreshCw,
+  SpellCheck,
   Trash2,
 } from 'lucide-react';
 import type {
   GeminiModel,
   ManuscriptSection,
+  ProcessingMode,
   ReprocessSource,
   SectionSaveStatus,
   VoiceEnding,
@@ -25,6 +27,7 @@ import {
   getActiveVersionIndex,
   getSectionVersions,
 } from '../types.ts';
+import { hasAudioClip } from '../lib/audioDb.ts';
 import {
   formatDuration,
   formatTimestamp,
@@ -59,6 +62,7 @@ interface SectionBlockProps {
     targetStyle: WritingStyle,
     targetEnding?: VoiceEnding,
     source?: ReprocessSource,
+    overrideMode?: ProcessingMode,
   ) => Promise<void>;
   onDeleteSection: (sectionId: string) => void;
   onCopyText: (text: string) => void;
@@ -79,16 +83,47 @@ export const SectionBlock = memo(function SectionBlock({
 }: SectionBlockProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const menuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const [showAudio, setShowAudio] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [menuOpensUpward, setMenuOpensUpward] = useState(false);
   const [showAudioReprocess, setShowAudioReprocess] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [localAudioAvailable, setLocalAudioAvailable] = useState<boolean | null>(() =>
+    section.storagePath || section.audioUrl ? true : section.audioId ? null : false,
+  );
 
   const versions = getSectionVersions(section);
   const activeVersionIndex = getActiveVersionIndex(section);
   const activeVersion = versions[activeVersionIndex];
   const activeMode = activeVersion.mode ?? section.mode;
-  const hasOriginalAudio = Boolean(section.storagePath || section.audioUrl || section.audioId);
+  const hasCloudAudio = Boolean(section.storagePath || section.audioUrl);
+  const hasAnyAudioReference = hasCloudAudio || Boolean(section.audioId);
+  const canUseAudioOnThisDevice = hasCloudAudio || localAudioAvailable === true;
+  const isAudioOnOtherDevice =
+    !hasCloudAudio && Boolean(section.audioId) && localAudioAvailable === false;
+
+  // Check IndexedDB presence for local-first audio clips so cross-device sections never show broken buttons
+  useEffect(() => {
+    if (hasCloudAudio) {
+      setLocalAudioAvailable(true);
+      return;
+    }
+    if (!section.audioId) {
+      setLocalAudioAvailable(false);
+      return;
+    }
+    let cancelled = false;
+    void hasAudioClip(section.audioId).then((exists) => {
+      if (!cancelled) {
+        setLocalAudioAvailable(exists);
+        if (!exists) setShowAudio(false);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [hasCloudAudio, section.audioId]);
 
   const syncTextareaMinHeight = useCallback(() => {
     const el = textareaRef.current;
@@ -175,11 +210,25 @@ export const SectionBlock = memo(function SectionBlock({
   };
 
   const isCurrentOption = (opt: ReprocessOption) => {
+    if (activeMode === 'proofread_only') return false;
     if (opt.style !== activeVersion.style) return false;
     if (opt.style === 'refined_flow') {
       return (activeVersion.refinedEnding ?? 'colloquial') === (opt.refinedEnding ?? 'colloquial');
     }
     return true;
+  };
+
+  const handleToggleMenu = () => {
+    setMenuOpen((prev) => {
+      const next = !prev;
+      if (next && menuTriggerRef.current && typeof window !== 'undefined') {
+        const rect = menuTriggerRef.current.getBoundingClientRect();
+        const spaceBelow = window.innerHeight - rect.bottom;
+        const spaceAbove = rect.top;
+        setMenuOpensUpward(spaceBelow < 320 && spaceAbove > spaceBelow);
+      }
+      return next;
+    });
   };
 
   return (
@@ -238,6 +287,11 @@ export const SectionBlock = memo(function SectionBlock({
               <span aria-hidden="true">·</span>
               <span>Summary</span>
             </>
+          ) : activeMode === 'proofread_only' ? (
+            <>
+              <span aria-hidden="true">·</span>
+              <span>Proofread</span>
+            </>
           ) : null}
           <span aria-hidden="true">·</span>
           <span title={MODEL_LABELS[activeVersion.model]}>
@@ -257,7 +311,7 @@ export const SectionBlock = memo(function SectionBlock({
           <span
             className={
               saveStatus === 'saving'
-                ? 'text-[#4338CA]'
+                ? 'text-[#312E81]'
                 : saveStatus === 'error'
                   ? 'text-[#DC2626]'
                   : 'text-[#6B7280]'
@@ -269,11 +323,11 @@ export const SectionBlock = memo(function SectionBlock({
 
         {/* Section controls */}
         <div className="flex flex-wrap items-center gap-1">
-          {(section.audioUrl || section.audioId) && section.audioMeta ? (
+          {canUseAudioOnThisDevice && hasAnyAudioReference && section.audioMeta ? (
             <button
               type="button"
               onClick={() => setShowAudio((prev) => !prev)}
-              className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] ${
+              className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81] ${
                 showAudio
                   ? 'bg-[#EEF2FF] text-[#312E81]'
                   : 'text-[#4B5563] hover:bg-[#F3F4F6] hover:text-[#111827]'
@@ -283,12 +337,20 @@ export const SectionBlock = memo(function SectionBlock({
               <Headphones className="h-3.5 w-3.5" />
               <span>Audio</span>
             </button>
+          ) : isAudioOnOtherDevice ? (
+            <span
+              className="inline-flex items-center gap-1 whitespace-nowrap px-2 py-1 text-[11px] text-[#9CA3AF]"
+              title="Original audio is stored locally on the device used to record this section"
+            >
+              <Headphones className="h-3 w-3 opacity-70" aria-hidden="true" />
+              <span>Local audio on other device</span>
+            </span>
           ) : null}
 
           <button
             type="button"
             onClick={handleCopy}
-            className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium text-[#4B5563] transition-colors duration-150 hover:bg-[#F3F4F6] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA]"
+            className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium text-[#4B5563] transition-colors duration-150 hover:bg-[#F3F4F6] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81]"
           >
             {copied ? (
               <>
@@ -303,16 +365,17 @@ export const SectionBlock = memo(function SectionBlock({
             )}
           </button>
 
-          {/* Re-process style menu supporting all 3 styles & Refined Flow endings (non-destructive) */}
+          {/* Re-process style menu supporting all 3 styles, Proofread Only, & Refined Flow endings */}
           <div ref={menuRef} className="relative">
             <button
+              ref={menuTriggerRef}
               type="button"
               disabled={isReprocessing}
               aria-haspopup="menu"
               aria-expanded={menuOpen}
-              onClick={() => setMenuOpen((prev) => !prev)}
-              title={`Create a new version in another style using ${MODEL_LABELS[activeModel]} (keeps previous versions)`}
-              className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium text-[#4338CA] transition-colors duration-150 hover:bg-[#EEF2FF] hover:text-[#312E81] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-wait disabled:opacity-60"
+              onClick={handleToggleMenu}
+              title={`Create a new version in another style or proofread using ${MODEL_LABELS[activeModel]} (keeps previous versions)`}
+              className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium text-[#312E81] transition-colors duration-150 hover:bg-[#EEF2FF] hover:text-[#27246A] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81] disabled:cursor-wait disabled:opacity-60"
             >
               {isReprocessing ? (
                 <>
@@ -332,7 +395,9 @@ export const SectionBlock = memo(function SectionBlock({
             {menuOpen && !isReprocessing && (
               <div
                 role="menu"
-                className="absolute left-1/2 z-20 mt-1.5 w-56 -translate-x-1/2 rounded-lg border border-[#E5E7EB] bg-white py-1 shadow-sm sm:left-auto sm:right-0 sm:translate-x-0"
+                className={`absolute left-1/2 z-20 w-56 -translate-x-1/2 rounded-lg border border-[#E5E7EB] bg-white py-1 shadow-[0_10px_30px_rgba(17,24,39,0.12)] sm:left-auto sm:right-0 sm:translate-x-0 ${
+                  menuOpensUpward ? 'bottom-full mb-1.5' : 'top-full mt-1.5'
+                }`}
               >
                 <div className="px-3 py-1 text-[10px] font-medium uppercase tracking-wider text-[#9CA3AF]">
                   Restyle text (fast)
@@ -346,7 +411,13 @@ export const SectionBlock = memo(function SectionBlock({
                       role="menuitem"
                       onClick={() => {
                         setMenuOpen(false);
-                        void onReprocessStyle(section, opt.style, opt.refinedEnding, 'text');
+                        void onReprocessStyle(
+                          section,
+                          opt.style,
+                          opt.refinedEnding,
+                          'text',
+                          'full_polish',
+                        );
                       }}
                       className={`flex w-full items-center justify-between px-3 py-2 text-left text-xs transition-colors ${
                         active
@@ -355,12 +426,50 @@ export const SectionBlock = memo(function SectionBlock({
                       }`}
                     >
                       <span className="whitespace-nowrap">{opt.label}</span>
-                      {active ? <Check className="h-3.5 w-3.5 text-[#4338CA]" /> : null}
+                      {active ? <Check className="h-3.5 w-3.5 text-[#312E81]" /> : null}
                     </button>
                   );
                 })}
 
-                {hasOriginalAudio && (
+                <div className="mt-1 border-t border-[#F3F4F6] pt-1">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      void onReprocessStyle(
+                        section,
+                        activeVersion.style,
+                        activeVersion.refinedEnding,
+                        'text',
+                        'proofread_only',
+                      );
+                    }}
+                    className={`flex w-full items-start justify-between gap-2 px-3 py-2 text-left transition-colors ${
+                      activeMode === 'proofread_only'
+                        ? 'bg-[#EEF2FF]/70 text-[#312E81]'
+                        : 'text-[#374151] hover:bg-[#F8F9FA] hover:text-[#111827]'
+                    }`}
+                  >
+                    <span className="flex items-start gap-2">
+                      <SpellCheck
+                        className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#312E81]"
+                        aria-hidden="true"
+                      />
+                      <span>
+                        <span className="block text-xs font-medium">Proofread Only</span>
+                        <span className="block text-[10px] leading-tight text-[#6B7280]">
+                          Spelling, ၊ ။ &amp; spacing only
+                        </span>
+                      </span>
+                    </span>
+                    {activeMode === 'proofread_only' ? (
+                      <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#312E81]" />
+                    ) : null}
+                  </button>
+                </div>
+
+                {canUseAudioOnThisDevice && hasAnyAudioReference && (
                   <div className="mt-1 border-t border-[#F3F4F6] pt-1">
                     <button
                       type="button"
@@ -392,6 +501,7 @@ export const SectionBlock = memo(function SectionBlock({
                                 opt.style,
                                 opt.refinedEnding,
                                 'audio',
+                                'full_polish',
                               );
                             }}
                             className="flex w-full items-center justify-between px-3.5 py-1.5 text-left text-[11px] text-[#4B5563] transition-colors hover:bg-[#EEF2FF]/60 hover:text-[#312E81]"
@@ -413,7 +523,7 @@ export const SectionBlock = memo(function SectionBlock({
             onClick={() => onDeleteSection(section.id)}
             aria-label={`Move section ${index + 1} to Trash`}
             title="Move section to Trash"
-            className="inline-flex items-center gap-1 whitespace-nowrap rounded-md px-2 py-1.5 text-xs font-medium text-[#6B7280] transition-colors duration-150 hover:bg-[#FEE2E2] hover:text-[#DC2626] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:opacity-50"
+            className="inline-flex items-center gap-1 whitespace-nowrap rounded-md px-2 py-1.5 text-xs font-medium text-[#6B7280] transition-colors duration-150 hover:bg-[#FEE2E2] hover:text-[#DC2626] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81] disabled:opacity-50"
           >
             <Trash2 className="h-3.5 w-3.5" />
             <span className="sr-only sm:not-sr-only">Delete</span>
@@ -422,7 +532,7 @@ export const SectionBlock = memo(function SectionBlock({
       </div>
 
       {/* Optional persisted cloud/local audio playback & backup bar */}
-      {showAudio && (section.audioUrl || section.audioId) && section.audioMeta ? (
+      {showAudio && canUseAudioOnThisDevice && hasAnyAudioReference && section.audioMeta ? (
         <div className="mb-4">
           <AudioPlayerBar
             audioUrl={section.audioUrl}

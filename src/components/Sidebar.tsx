@@ -122,7 +122,7 @@ export function Sidebar({
           onClick={onToggleDesktop}
           aria-label="Collapse sidebar"
           title="Collapse sidebar"
-          className="hidden h-8 w-8 items-center justify-center rounded-md text-[#6B7280] transition-colors duration-150 hover:bg-[#ECEEF1] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] lg:inline-flex"
+          className="hidden h-8 w-8 items-center justify-center rounded-md text-[#6B7280] transition-colors duration-150 hover:bg-[#ECEEF1] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81] lg:inline-flex"
         >
           <PanelLeftClose className="h-4 w-4" />
         </button>
@@ -146,7 +146,7 @@ export function Sidebar({
             onCreateSession();
             onCloseMobile();
           }}
-          className="flex w-full items-center justify-center gap-2 whitespace-nowrap rounded-lg bg-[#4338CA] px-4 py-2.5 text-sm font-medium text-white transition-colors duration-150 hover:bg-[#3730A3] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-wait disabled:opacity-65"
+          className="flex w-full items-center justify-center gap-2 whitespace-nowrap rounded-lg bg-[#312E81] px-4 py-2.5 text-sm font-medium text-white transition-colors duration-150 hover:bg-[#27246A] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81] disabled:cursor-wait disabled:opacity-65"
         >
           {isCreatingStory ? (
             <>
@@ -175,7 +175,7 @@ export function Sidebar({
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="Search stories…"
             aria-label="Search stories by title"
-            className="w-full rounded-lg border border-[#E5E7EB] bg-white py-1.5 pl-8 pr-7 text-base text-[#111827] placeholder:text-[#9CA3AF] transition-colors focus:border-[#4338CA] focus:outline-none lg:text-xs"
+            className="w-full rounded-lg border border-[#E5E7EB] bg-white py-1.5 pl-8 pr-7 text-base text-[#111827] placeholder:text-[#9CA3AF] transition-colors focus:border-[#312E81] focus:outline-none lg:text-xs"
           />
           {searchQuery && (
             <button
@@ -241,14 +241,14 @@ export function Sidebar({
                     }}
                     onBlur={commitRename}
                     aria-label="Story title"
-                    className="min-w-0 flex-1 rounded border border-[#4338CA] bg-white px-2 py-1 text-base text-[#111827] focus:outline-none lg:text-sm"
+                    className="min-w-0 flex-1 rounded border border-[#312E81] bg-white px-2 py-1 text-base text-[#111827] focus:outline-none lg:text-sm"
                   />
                   <button
                     type="button"
                     onMouseDown={(e) => e.preventDefault()}
                     onClick={commitRename}
                     aria-label="Save title"
-                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-[#4338CA] hover:bg-[#EEF2FF]"
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-[#312E81] hover:bg-[#EEF2FF]"
                   >
                     <Check className="h-3.5 w-3.5" />
                   </button>
@@ -330,11 +330,11 @@ export function Sidebar({
               type="button"
               disabled={isLoadingMoreStories}
               onClick={onLoadOlderStories}
-              className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-[#E5E7EB] bg-white px-3 py-2 text-xs font-medium text-[#4B5563] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-wait disabled:opacity-60"
+              className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-[#E5E7EB] bg-white px-3 py-2 text-xs font-medium text-[#4B5563] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81] disabled:cursor-wait disabled:opacity-60"
             >
               {isLoadingMoreStories ? (
                 <>
-                  <Loader2 className="h-3.5 w-3.5 animate-spin text-[#4338CA]" />
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-[#312E81]" />
                   <span>Loading older stories…</span>
                 </>
               ) : (
@@ -353,7 +353,7 @@ export function Sidebar({
             onSelectTrash();
             onCloseMobile();
           }}
-          className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-xs font-medium transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] ${
+          className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-xs font-medium transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81] ${
             activeView === 'trash'
               ? 'border border-[#E5E7EB] bg-white text-[#111827]'
               : 'border border-transparent text-[#4B5563] hover:bg-[#EFEFF2]/70 hover:text-[#111827]'
@@ -385,7 +385,7 @@ export function Sidebar({
           <button
             type="button"
             onClick={onSignOut}
-            className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-[#E5E7EB] bg-white px-2.5 py-1.5 text-xs font-medium text-[#4B5563] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA]"
+            className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-[#E5E7EB] bg-white px-2.5 py-1.5 text-xs font-medium text-[#4B5563] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81]"
             title="Sign out"
           >
             <LogOut className="h-3.5 w-3.5" />

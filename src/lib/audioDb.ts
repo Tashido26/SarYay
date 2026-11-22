@@ -80,6 +80,22 @@ export async function getAudioClip(id: string): Promise<StoredAudioRecord | null
   }
 }
 
+export async function hasAudioClip(id: string): Promise<boolean> {
+  if (!id) return false;
+  try {
+    const db = await openAudioDb();
+    return await new Promise<boolean>((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readonly');
+      const store = tx.objectStore(STORE_NAME);
+      const req = store.count(id);
+      req.onsuccess = () => resolve((req.result ?? 0) > 0);
+      req.onerror = () => reject(req.error ?? new Error('Failed to check local audio clip.'));
+    });
+  } catch {
+    return false;
+  }
+}
+
 export async function deleteAudioClip(id: string): Promise<void> {
   try {
     const db = await openAudioDb();
