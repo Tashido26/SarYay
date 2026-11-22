@@ -853,7 +853,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   }, [glossaryDraft]);
 
   const handleScrollToTop = useCallback(() => {
-    mainScrollRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   }, []);
 
   const handleJumpToSection = useCallback((sectionId: string) => {
@@ -897,8 +897,8 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       const el = container?.querySelector<HTMLElement>(`[data-section-id="${targetId}"]`);
       if (el) {
         el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      } else if (container) {
-        container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+      } else {
+        window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' });
       }
     });
   }, [orderedSections]);
@@ -1082,6 +1082,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       setLastOpenedStoryId(nextStoryId);
       setActiveView('story');
       setGlobalError(null);
+      window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
     },
     [flushAllPendingEdits],
   );
@@ -1093,6 +1094,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     }
     setActiveView('trash');
     setGlobalError(null);
+    window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
   }, [flushAllPendingEdits]);
 
   const handleCreateSession = async () => {
@@ -1824,7 +1826,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   }
 
   return (
-    <div className="flex h-[100dvh] w-full overflow-hidden bg-white text-[#111827]">
+    <div className="min-h-[100dvh] w-full bg-white text-[#111827]">
       <Sidebar
         sessions={activeStories}
         activeSessionId={activeSession?.id ?? ''}
@@ -1857,10 +1859,18 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
         onDeleteSession={handleRequestTrashStory}
       />
 
-      {/* Main editorial column */}
-      <div className="flex min-w-0 flex-1 flex-col bg-white">
-        {/* Top document utility bar (safe-top clears iPhone Dynamic Island / status bar) */}
-        <header className="safe-top ios-crisp-header relative z-20 shrink-0 border-b border-gray-200 bg-white">
+      {/* Main editorial column (native document scrolling eliminates iOS PWA 100dvh clipping & rising blank voids) */}
+      <div
+        className={`flex min-h-[100dvh] min-w-0 flex-col bg-white transition-[padding-left] duration-200 ${
+          sidebarOpen ? 'lg:pl-[268px]' : 'lg:pl-0'
+        }`}
+      >
+        {/* Fixed top document utility bar (safe-top clears iPhone Dynamic Island / status bar) */}
+        <header
+          className={`safe-top ios-crisp-header fixed inset-x-0 top-0 z-20 border-b border-gray-200 bg-white transition-[left] duration-200 ${
+            sidebarOpen ? 'lg:left-[268px]' : 'lg:left-0'
+          }`}
+        >
           <div className="flex h-14 items-center justify-between gap-2 px-3 sm:gap-3 sm:px-6">
             <div className="flex min-w-0 flex-1 items-center gap-1.5 sm:gap-2.5">
               <div className="flex shrink-0 items-center gap-0.5">
@@ -2034,10 +2044,10 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
           </div>
         </header>
 
-        {/* Scrollable main canvas (either Trash Bin view or active Story workspace) */}
+        {/* Native-scrolling main canvas (either Trash Bin view or active Story workspace) */}
         <main
           ref={mainScrollRef}
-          className={`flex-1 overflow-y-auto bg-white ${
+          className={`safe-top-with-header flex-1 bg-white ${
             activeView === 'story' && activeSession
               ? 'safe-bottom-with-dock'
               : 'safe-bottom-scroll'
@@ -2368,7 +2378,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                     <div
                       key={section.id}
                       data-section-id={section.id}
-                      className="scroll-mt-6"
+                      className="scroll-mt-header"
                     >
                       <SectionBlock
                         section={section}

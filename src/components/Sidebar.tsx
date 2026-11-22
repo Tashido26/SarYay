@@ -199,7 +199,7 @@ export function Sidebar({
         </p>
       </div>
 
-      <nav className="flex-1 space-y-1 overflow-y-auto px-2.5 pb-4" aria-label="Saved stories">
+      <nav className="flex-1 space-y-1 overflow-y-auto overscroll-contain px-2.5 pb-4" aria-label="Saved stories">
         {filteredSessions.length === 0 && normalizedQuery ? (
           <div className="px-3 py-6 text-center text-xs text-[#6B7280]">
             <p>No matching stories</p>
@@ -398,10 +398,10 @@ export function Sidebar({
 
   return (
     <>
-      {/* Desktop collapsible sidebar */}
+      {/* Desktop collapsible fixed sidebar */}
       <div
-        className={`hidden shrink-0 transition-[width] duration-200 lg:block ${
-          isOpen ? 'w-[268px]' : 'w-0 overflow-hidden'
+        className={`fixed inset-y-0 left-0 z-30 hidden overflow-hidden transition-[width] duration-200 lg:block ${
+          isOpen ? 'w-[268px]' : 'w-0 pointer-events-none'
         }`}
       >
         {isOpen && sidebarContent}

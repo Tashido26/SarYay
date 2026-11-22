@@ -18,7 +18,7 @@
   body {
     font-family: var(--font-sans);
     color: #111827;
-    overflow-x: hidden;
+    overflow-x: clip;
     -webkit-text-size-adjust: 100%;
     -webkit-tap-highlight-color: transparent;
   }
@@ -50,6 +50,14 @@
 /* iOS Dynamic Island / Notch & Home Indicator safe-area helpers */
 .safe-top {
   padding-top: env(safe-area-inset-top, 0px);
+}
+
+.safe-top-with-header {
+  padding-top: calc(3.5rem + env(safe-area-inset-top, 0px));
+}
+
+.scroll-mt-header {
+  scroll-margin-top: calc(4.75rem + env(safe-area-inset-top, 0px));
 }
 
 .safe-bottom {

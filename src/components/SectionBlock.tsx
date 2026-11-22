@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import {
   Check,
   ChevronDown,
@@ -48,6 +49,51 @@ const REPROCESS_OPTIONS: ReprocessOption[] = [
   { label: 'Refined Flow · Literary', style: 'refined_flow', refinedEnding: 'literary' },
 ];
 
+function getCaretOffsetFromPoint(
+  container: HTMLElement,
+  clientX: number,
+  clientY: number,
+  maxLength: number,
+): number | null {
+  if (typeof document === 'undefined') return null;
+  try {
+    let targetNode: Node | null = null;
+    let targetOffset = 0;
+
+    const docWithCaret = document as Document & {
+      caretPositionFromPoint?: (
+        x: number,
+        y: number,
+      ) => { offsetNode: Node; offset: number } | null;
+      caretRangeFromPoint?: (x: number, y: number) => Range | null;
+    };
+
+    if (typeof docWithCaret.caretRangeFromPoint === 'function') {
+      const range = docWithCaret.caretRangeFromPoint(clientX, clientY);
+      if (range) {
+        targetNode = range.startContainer;
+        targetOffset = range.startOffset;
+      }
+    } else if (typeof docWithCaret.caretPositionFromPoint === 'function') {
+      const pos = docWithCaret.caretPositionFromPoint(clientX, clientY);
+      if (pos) {
+        targetNode = pos.offsetNode;
+        targetOffset = pos.offset;
+      }
+    }
+
+    if (!targetNode || !container.contains(targetNode)) return null;
+
+    const preRange = document.createRange();
+    preRange.selectNodeContents(container);
+    preRange.setEnd(targetNode, targetOffset);
+    const offset = preRange.toString().replace(/\u200B/g, '').length;
+    return Math.max(0, Math.min(offset, maxLength));
+  } catch {
+    return null;
+  }
+}
+
 interface SectionBlockProps {
   section: ManuscriptSection;
   index: number;
@@ -83,8 +129,11 @@ export const SectionBlock = memo(function SectionBlock({
 }: SectionBlockProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const lastMeasuredWidthRef = useRef<number>(0);
+  const pointerDownRef = useRef<boolean>(false);
+  const exitEditRafRef = useRef<number | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const menuTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const [isEditing, setIsEditing] = useState(false);
   const [showAudio, setShowAudio] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuOpensUpward, setMenuOpensUpward] = useState(false);
@@ -130,9 +179,9 @@ export const SectionBlock = memo(function SectionBlock({
     const el = textareaRef.current;
     if (!el) return;
 
-    // Preserve <main> scrollTop so collapsing height to 0px for measurement never jumps the scroll viewport
-    const scrollContainer = el.closest('main');
-    const savedScrollTop = scrollContainer ? scrollContainer.scrollTop : null;
+    // Preserve native window scroll position so collapsing height to 0px for measurement never jumps the viewport
+    const savedScrollY = window.scrollY;
+    const savedScrollX = window.scrollX;
 
     el.style.minHeight = '';
     el.style.height = '0px';
@@ -147,16 +196,32 @@ export const SectionBlock = memo(function SectionBlock({
       el.scrollTop = 0;
     }
 
-    if (scrollContainer && savedScrollTop !== null && scrollContainer.scrollTop !== savedScrollTop) {
-      scrollContainer.scrollTop = savedScrollTop;
+    if (window.scrollY !== savedScrollY) {
+      window.scrollTo({ top: savedScrollY, left: savedScrollX, behavior: 'instant' as ScrollBehavior });
     }
   }, []);
 
   useLayoutEffect(() => {
+    if (!isEditing) return;
     syncTextareaHeight();
-  }, [activeVersion.text, activeVersionIndex, syncTextareaHeight]);
+  }, [isEditing, activeVersion.text, activeVersionIndex, syncTextareaHeight]);
 
   useEffect(() => {
+    if (isReprocessing && isEditing) {
+      setIsEditing(false);
+    }
+  }, [isReprocessing, isEditing]);
+
+  useEffect(() => {
+    return () => {
+      if (exitEditRafRef.current !== null) {
+        window.cancelAnimationFrame(exitEditRafRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isEditing) return;
     const el = textareaRef.current;
     if (!el) return;
 
@@ -189,22 +254,99 @@ export const SectionBlock = memo(function SectionBlock({
 
     // Re-measure accurately once web fonts (e.g. Noto Sans Myanmar) finish loading
     let cancelled = false;
-    if (typeof document !== 'undefined' && document.fonts?.ready) {
-      void document.fonts.ready.then(() => {
+    const fontSet = typeof document !== 'undefined' ? document.fonts : undefined;
+    if (fontSet?.ready) {
+      void fontSet.ready.then(() => {
         if (!cancelled) scheduleSync();
       });
     }
+    fontSet?.addEventListener?.('loadingdone', scheduleSync);
 
     window.addEventListener('resize', scheduleSync);
     return () => {
       cancelled = true;
       window.removeEventListener('resize', scheduleSync);
+      fontSet?.removeEventListener?.('loadingdone', scheduleSync);
       observer?.disconnect();
       if (rafId !== null) {
         window.cancelAnimationFrame(rafId);
       }
     };
-  }, [syncTextareaHeight]);
+  }, [isEditing, syncTextareaHeight]);
+
+  const enterEditModeSync = useCallback(
+    (caretOffset: number | null) => {
+      if (isReprocessing) return;
+      if (exitEditRafRef.current !== null) {
+        window.cancelAnimationFrame(exitEditRafRef.current);
+        exitEditRafRef.current = null;
+      }
+
+      // Synchronous flushSync keeps textarea.focus() inside the user tap gesture so iOS opens the keyboard on 1st tap
+      flushSync(() => {
+        setIsEditing(true);
+      });
+
+      const ta = textareaRef.current;
+      if (!ta) return;
+
+      syncTextareaHeight();
+      try {
+        ta.focus({ preventScroll: true });
+      } catch {
+        ta.focus();
+      }
+      if (caretOffset !== null) {
+        try {
+          ta.setSelectionRange(caretOffset, caretOffset);
+        } catch {
+          // Ignore selection errors if element is not selectable
+        }
+      }
+    },
+    [isReprocessing, syncTextareaHeight],
+  );
+
+  const handleReadSurfaceClick = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      pointerDownRef.current = false;
+      if (isReprocessing) return;
+      // Do not hijack drag-selection or long-press text copy
+      const selection = window.getSelection();
+      if (selection && !selection.isCollapsed && selection.toString().length > 0) {
+        return;
+      }
+      const offset = getCaretOffsetFromPoint(
+        e.currentTarget,
+        e.clientX,
+        e.clientY,
+        activeVersion.text.length,
+      );
+      enterEditModeSync(offset);
+    },
+    [isReprocessing, activeVersion.text.length, enterEditModeSync],
+  );
+
+  const handleReadSurfaceFocus = useCallback(() => {
+    // Only auto-enter edit mode on keyboard Tab focus (mouse/touch taps are handled by onClick with exact caret offset)
+    if (pointerDownRef.current || isReprocessing) return;
+    enterEditModeSync(activeVersion.text.length);
+  }, [isReprocessing, activeVersion.text.length, enterEditModeSync]);
+
+  const handleTextareaBlur = useCallback(() => {
+    syncTextareaHeight();
+    onFlushContent?.(section.id);
+    // Defer unmounting textarea by 1 frame so document focusout listeners still see the blurred textarea inside <main>
+    if (exitEditRafRef.current !== null) {
+      window.cancelAnimationFrame(exitEditRafRef.current);
+    }
+    exitEditRafRef.current = window.requestAnimationFrame(() => {
+      exitEditRafRef.current = null;
+      if (document.activeElement !== textareaRef.current) {
+        setIsEditing(false);
+      }
+    });
+  }, [onFlushContent, section.id, syncTextareaHeight]);
 
   useEffect(() => {
     if (!menuOpen) {
@@ -572,24 +714,50 @@ export const SectionBlock = memo(function SectionBlock({
         </div>
       ) : null}
 
-      {/* Editable Burmese/English literary prose editor (direct auto-sized textarea avoids iOS WebKit clipping) */}
+      {/* Prose reader/editor: plain DOM text while scrolling prevents iOS WebKit tall-textarea clipping & blank bottom voids; 1-tap swaps synchronously to auto-sized textarea */}
       <div className="rounded-lg transition-colors duration-150 focus-within:bg-[#FAFAFC]">
-        <textarea
-          ref={textareaRef}
-          value={activeVersion.text}
-          onChange={handleTextChange}
-          onFocus={syncTextareaHeight}
-          onBlur={() => {
-            syncTextareaHeight();
-            onFlushContent?.(section.id);
-          }}
-          disabled={isReprocessing}
-          rows={1}
-          spellCheck={false}
-          aria-label={`Editable prose for section ${index + 1}, version ${activeVersionIndex + 1} of ${versions.length}`}
-          placeholder="Your transcribed manuscript prose will appear here…"
-          className="font-manuscript box-border block w-full resize-none overflow-hidden whitespace-pre-wrap break-words rounded-lg border border-transparent bg-transparent px-2.5 pt-2 pb-2 text-[16.5px] text-[#111827] placeholder:text-[#9CA3AF] [overflow-wrap:break-word] focus:border-[#E5E7EB] focus:outline-none disabled:opacity-60"
-        />
+        {isEditing && !isReprocessing ? (
+          <textarea
+            ref={textareaRef}
+            value={activeVersion.text}
+            onChange={handleTextChange}
+            onFocus={syncTextareaHeight}
+            onBlur={handleTextareaBlur}
+            disabled={isReprocessing}
+            rows={1}
+            spellCheck={false}
+            aria-label={`Editable prose for section ${index + 1}, version ${activeVersionIndex + 1} of ${versions.length}`}
+            placeholder="Your transcribed manuscript prose will appear here…"
+            className="font-manuscript box-border block w-full resize-none overflow-hidden whitespace-pre-wrap break-words rounded-lg border border-[#E5E7EB] bg-[#FAFAFC] px-2.5 pt-2 pb-2 text-[16.5px] text-[#111827] placeholder:text-[#9CA3AF] [overflow-wrap:break-word] focus:outline-none disabled:opacity-60"
+          />
+        ) : (
+          <div
+            role="textbox"
+            aria-multiline="true"
+            aria-label={`Editable prose for section ${index + 1}, version ${activeVersionIndex + 1} of ${versions.length}. Tap or click to edit.`}
+            tabIndex={isReprocessing ? -1 : 0}
+            onPointerDown={() => {
+              pointerDownRef.current = true;
+            }}
+            onPointerCancel={() => {
+              pointerDownRef.current = false;
+            }}
+            onClick={handleReadSurfaceClick}
+            onFocus={handleReadSurfaceFocus}
+            onBlur={() => {
+              pointerDownRef.current = false;
+            }}
+            className={`font-manuscript box-border block w-full cursor-text select-text whitespace-pre-wrap break-words rounded-lg border border-transparent bg-transparent px-2.5 pt-2 pb-2 text-[16.5px] [overflow-wrap:break-word] focus:outline-none ${
+              isReprocessing ? 'pointer-events-none opacity-60' : ''
+            } ${activeVersion.text ? 'text-[#111827]' : 'min-h-[64px] text-[#9CA3AF]'}`}
+          >
+            {activeVersion.text
+              ? activeVersion.text.endsWith('\n')
+                ? `${activeVersion.text}\u200B`
+                : activeVersion.text
+              : 'Your transcribed manuscript prose will appear here…'}
+          </div>
+        )}
       </div>
 
       {/* Subtle, low-contrast per-version token usage & estimated cost */}
