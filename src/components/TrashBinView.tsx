@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   Check,
   ChevronDown,
@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import type { ManuscriptSection, StorySession, TrashedSection } from '../types.ts';
 import { formatCompactStyleLabel, getActiveSectionVersion } from '../types.ts';
+import { hasAudioClip } from '../lib/audioDb.ts';
 import { fetchStorySectionsOnce } from '../lib/cloudStore.ts';
 import {
   formatDuration,
@@ -48,8 +49,44 @@ export function TrashBinView({
   const [loadingStoryId, setLoadingStoryId] = useState<string | null>(null);
   const [openAudioId, setOpenAudioId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [localAudioMap, setLocalAudioMap] = useState<Record<string, boolean>>({});
 
   const totalCount = trashedStories.length + trashedSections.length;
+
+  useEffect(() => {
+    const candidateIds = new Set<string>();
+    for (const sec of trashedSections) {
+      if (!sec.audioUrl && !sec.storagePath && sec.audioId) {
+        candidateIds.add(sec.audioId);
+      }
+    }
+    for (const list of Object.values(storySectionsMap)) {
+      for (const sec of list) {
+        if (!sec.audioUrl && !sec.storagePath && sec.audioId) {
+          candidateIds.add(sec.audioId);
+        }
+      }
+    }
+    const unchecked = Array.from(candidateIds).filter((id) => localAudioMap[id] === undefined);
+    if (unchecked.length === 0) return;
+
+    let cancelled = false;
+    void Promise.all(
+      unchecked.map(async (id) => [id, await hasAudioClip(id)] as const),
+    ).then((entries) => {
+      if (cancelled) return;
+      setLocalAudioMap((prev) => {
+        const next = { ...prev };
+        for (const [id, exists] of entries) {
+          next[id] = exists;
+        }
+        return next;
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [trashedSections, storySectionsMap, localAudioMap]);
 
   const handleToggleStoryPreview = async (storyId: string) => {
     if (expandedStoryId === storyId) {
@@ -175,7 +212,7 @@ export function TrashBinView({
                             type="button"
                             disabled={isBusy}
                             onClick={() => onRestoreStory(story)}
-                            className="inline-flex items-center gap-1.5 rounded-md border border-[#E5E7EB] bg-white px-2.5 py-1.5 text-xs font-medium text-[#4338CA] transition-colors hover:border-[#C7D2FE] hover:bg-[#EEF2FF] disabled:opacity-50"
+                            className="inline-flex items-center gap-1.5 rounded-md border border-[#E5E7EB] bg-white px-2.5 py-1.5 text-xs font-medium text-[#312E81] transition-colors hover:border-[#C7D2FE] hover:bg-[#EEF2FF] disabled:opacity-50"
                           >
                             {isBusy ? (
                               <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -200,7 +237,7 @@ export function TrashBinView({
                         <div className="mt-4 border-t border-[#E5E7EB] pt-3">
                           {isLoadingPreview ? (
                             <div className="flex items-center gap-2 py-2 text-xs text-[#6B7280]">
-                              <Loader2 className="h-3.5 w-3.5 animate-spin text-[#4338CA]" />
+                              <Loader2 className="h-3.5 w-3.5 animate-spin text-[#312E81]" />
                               <span>Loading sections…</span>
                             </div>
                           ) : !previewSections || previewSections.length === 0 ? (
@@ -213,6 +250,15 @@ export function TrashBinView({
                                 const activeVer = getActiveSectionVersion(sec);
                                 const audioOpen = openAudioId === `story_${sec.id}`;
                                 const copyKey = `story_${sec.id}`;
+                                const hasCloudAudio = Boolean(sec.audioUrl || sec.storagePath);
+                                const canPlayAudio =
+                                  Boolean(sec.audioMeta) &&
+                                  (hasCloudAudio ||
+                                    Boolean(sec.audioId && localAudioMap[sec.audioId] === true));
+                                const isOtherDeviceAudio =
+                                  !hasCloudAudio &&
+                                  Boolean(sec.audioId) &&
+                                  localAudioMap[sec.audioId!] === false;
                                 return (
                                   <div
                                     key={sec.id}
@@ -232,7 +278,7 @@ export function TrashBinView({
                                         </span>
                                       </div>
                                       <div className="flex items-center gap-1">
-                                        {(sec.audioUrl || sec.audioId) && sec.audioMeta ? (
+                                        {canPlayAudio ? (
                                           <button
                                             type="button"
                                             onClick={() =>
@@ -243,6 +289,14 @@ export function TrashBinView({
                                             <Headphones className="h-3.5 w-3.5" />
                                             <span>Audio</span>
                                           </button>
+                                        ) : isOtherDeviceAudio ? (
+                                          <span
+                                            className="inline-flex items-center gap-1 whitespace-nowrap px-2 py-1 text-[11px] text-[#9CA3AF]"
+                                            title="Original audio is stored locally on the device used to record this section"
+                                          >
+                                            <Headphones className="h-3 w-3 opacity-70" aria-hidden="true" />
+                                            <span>Local audio on other device</span>
+                                          </span>
                                         ) : null}
                                         <button
                                           type="button"
@@ -264,7 +318,7 @@ export function TrashBinView({
                                       </div>
                                     </div>
 
-                                    {audioOpen && (sec.audioUrl || sec.audioId) && sec.audioMeta ? (
+                                    {audioOpen && canPlayAudio && sec.audioMeta ? (
                                       <div className="mb-3">
                                         <AudioPlayerBar
                                           audioUrl={sec.audioUrl}
@@ -303,7 +357,12 @@ export function TrashBinView({
                 {trashedSections.map((sec) => {
                   const isBusy = busyItemId === sec.id;
                   const activeVer = getActiveSectionVersion(sec);
-                  const hasAudio = Boolean((sec.audioUrl || sec.audioId) && sec.audioMeta);
+                  const hasCloudAudio = Boolean(sec.audioUrl || sec.storagePath);
+                  const canPlayAudio =
+                    Boolean(sec.audioMeta) &&
+                    (hasCloudAudio || Boolean(sec.audioId && localAudioMap[sec.audioId] === true));
+                  const isOtherDeviceAudio =
+                    !hasCloudAudio && Boolean(sec.audioId) && localAudioMap[sec.audioId!] === false;
                   const audioOpen = openAudioId === sec.id;
 
                   return (
@@ -337,7 +396,7 @@ export function TrashBinView({
                         </div>
 
                         <div className="flex shrink-0 flex-wrap items-center gap-1">
-                          {hasAudio && (
+                          {canPlayAudio ? (
                             <button
                               type="button"
                               onClick={() => setOpenAudioId(audioOpen ? null : sec.id)}
@@ -350,7 +409,15 @@ export function TrashBinView({
                               <Headphones className="h-3.5 w-3.5" />
                               <span>Audio</span>
                             </button>
-                          )}
+                          ) : isOtherDeviceAudio ? (
+                            <span
+                              className="inline-flex items-center gap-1 whitespace-nowrap px-2 py-1 text-[11px] text-[#9CA3AF]"
+                              title="Original audio is stored locally on the device used to record this section"
+                            >
+                              <Headphones className="h-3 w-3 opacity-70" aria-hidden="true" />
+                              <span>Local audio on other device</span>
+                            </span>
+                          ) : null}
                           <button
                             type="button"
                             onClick={() => handleCopy(sec.id, activeVer.text)}
@@ -372,7 +439,7 @@ export function TrashBinView({
                             type="button"
                             disabled={isBusy}
                             onClick={() => onRestoreSection(sec)}
-                            className="inline-flex items-center gap-1.5 rounded-md border border-[#E5E7EB] bg-white px-2.5 py-1.5 text-xs font-medium text-[#4338CA] transition-colors hover:border-[#C7D2FE] hover:bg-[#EEF2FF] disabled:opacity-50"
+                            className="inline-flex items-center gap-1.5 rounded-md border border-[#E5E7EB] bg-white px-2.5 py-1.5 text-xs font-medium text-[#312E81] transition-colors hover:border-[#C7D2FE] hover:bg-[#EEF2FF] disabled:opacity-50"
                           >
                             {isBusy ? (
                               <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -393,7 +460,7 @@ export function TrashBinView({
                         </div>
                       </div>
 
-                      {audioOpen && hasAudio && sec.audioMeta ? (
+                      {audioOpen && canPlayAudio && sec.audioMeta ? (
                         <div className="mb-3">
                           <AudioPlayerBar
                             audioUrl={sec.audioUrl}

@@ -48,7 +48,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
             <button
               type="button"
               onClick={() => window.location.reload()}
-              className="mt-6 inline-flex items-center gap-2 rounded-lg bg-[#4338CA] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[#3730A3]"
+              className="mt-6 inline-flex items-center gap-2 rounded-lg bg-[#312E81] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[#27246A]"
             >
               <RefreshCw className="h-3.5 w-3.5" />
               <span>Reload Workspace</span>

@@ -62,6 +62,7 @@ interface DictationDockProps {
     audio: StagedAudio,
     mode: ProcessingMode,
     signal: AbortSignal,
+    targetStoryId: string,
   ) => Promise<void>;
 }
 
@@ -134,6 +135,7 @@ export function DictationDock({
   const [canPauseResume, setCanPauseResume] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [stagedAudio, setStagedAudio] = useState<StagedAudio | null>(null);
+  const [stagedStoryId, setStagedStoryId] = useState<string | null>(null);
   const [isRecoveredDraft, setIsRecoveredDraft] = useState(false);
   const [hasFailedAttempt, setHasFailedAttempt] = useState(false);
   const [uploadMode, setUploadMode] = useState<ProcessingMode>('full_polish');
@@ -141,7 +143,7 @@ export function DictationDock({
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [isMobileTyping, setIsMobileTyping] = useState(false);
+  const [isMainTyping, setIsMainTyping] = useState(false);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -154,7 +156,8 @@ export function DictationDock({
   const isTranscribingRef = useRef<boolean>(false);
   const isPausedRef = useRef<boolean>(false);
   const storyIdRef = useRef<string>(storyId);
-  const mobileBlurTimerRef = useRef<number | null>(null);
+  const stagedStoryIdRef = useRef<string | null>(null);
+  const mainBlurTimerRef = useRef<number | null>(null);
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -171,6 +174,10 @@ export function DictationDock({
   }, [storyId]);
 
   useEffect(() => {
+    stagedStoryIdRef.current = stagedStoryId;
+  }, [stagedStoryId]);
+
+  useEffect(() => {
     isRecordingRef.current = isRecording;
   }, [isRecording]);
 
@@ -182,11 +189,12 @@ export function DictationDock({
     isPausedRef.current = isPaused;
   }, [isPaused]);
 
-  // Hide idle bottom dock while typing in an input/textarea on mobile (< 1024px) for maximum writing room
+  // Smoothly slide/fade idle dock on mobile (< 1024px) ONLY when typing inside <main> (never Sidebar/Drawers)
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    const isTextEditableTarget = (el: EventTarget | null): boolean => {
+    const isMainEditableTarget = (el: EventTarget | null): boolean => {
       if (!(el instanceof HTMLElement)) return false;
+      if (!el.closest('main')) return false;
       const tag = el.tagName;
       if (tag === 'TEXTAREA') return true;
       if (tag === 'INPUT') {
@@ -198,31 +206,31 @@ export function DictationDock({
 
     const handleFocusIn = (e: FocusEvent) => {
       if (window.innerWidth >= 1024) return;
-      if (isTextEditableTarget(e.target)) {
-        if (mobileBlurTimerRef.current !== null) {
-          window.clearTimeout(mobileBlurTimerRef.current);
-          mobileBlurTimerRef.current = null;
+      if (isMainEditableTarget(e.target)) {
+        if (mainBlurTimerRef.current !== null) {
+          window.clearTimeout(mainBlurTimerRef.current);
+          mainBlurTimerRef.current = null;
         }
-        setIsMobileTyping(true);
+        setIsMainTyping(true);
       }
     };
 
-    const handleFocusOut = () => {
-      if (mobileBlurTimerRef.current !== null) {
-        window.clearTimeout(mobileBlurTimerRef.current);
+    const handleFocusOut = (e: FocusEvent) => {
+      if (!isMainEditableTarget(e.target)) return;
+      if (mainBlurTimerRef.current !== null) {
+        window.clearTimeout(mainBlurTimerRef.current);
       }
-      mobileBlurTimerRef.current = window.setTimeout(() => {
-        mobileBlurTimerRef.current = null;
-        const active = document.activeElement;
-        if (window.innerWidth >= 1024 || !isTextEditableTarget(active)) {
-          setIsMobileTyping(false);
+      mainBlurTimerRef.current = window.setTimeout(() => {
+        mainBlurTimerRef.current = null;
+        if (window.innerWidth >= 1024 || !isMainEditableTarget(document.activeElement)) {
+          setIsMainTyping(false);
         }
-      }, 120);
+      }, 60);
     };
 
     const handleResize = () => {
       if (window.innerWidth >= 1024) {
-        setIsMobileTyping(false);
+        setIsMainTyping(false);
       }
     };
 
@@ -233,8 +241,8 @@ export function DictationDock({
       document.removeEventListener('focusin', handleFocusIn);
       document.removeEventListener('focusout', handleFocusOut);
       window.removeEventListener('resize', handleResize);
-      if (mobileBlurTimerRef.current !== null) {
-        window.clearTimeout(mobileBlurTimerRef.current);
+      if (mainBlurTimerRef.current !== null) {
+        window.clearTimeout(mainBlurTimerRef.current);
       }
     };
   }, []);
@@ -311,18 +319,58 @@ export function DictationDock({
   }, [releaseScreenWakeLock]);
 
   const clearStagedAudio = useCallback((removeLocalDraft = false) => {
+    const draftOwnerStoryId = stagedStoryIdRef.current || storyIdRef.current;
     if (stagedUrlRef.current) {
       URL.revokeObjectURL(stagedUrlRef.current);
       stagedUrlRef.current = null;
     }
+    stagedStoryIdRef.current = null;
+    setStagedStoryId(null);
     setStagedAudio(null);
     setIsRecoveredDraft(false);
     setHasFailedAttempt(false);
     setErrorMessage(null);
-    if (removeLocalDraft && storyIdRef.current) {
-      void deletePendingDraftAudio(storyIdRef.current);
+    if (removeLocalDraft && draftOwnerStoryId) {
+      void deletePendingDraftAudio(draftOwnerStoryId);
     }
   }, []);
+
+  const loadPendingDraftForStory = useCallback(
+    (targetStoryId: string, isCancelled?: () => boolean) => {
+      if (!targetStoryId) return;
+      void getPendingDraftAudio(targetStoryId).then((draft) => {
+        if (
+          isCancelled?.() ||
+          !draft ||
+          !draft.blob ||
+          draft.blob.size === 0 ||
+          storyIdRef.current !== targetStoryId ||
+          isRecordingRef.current ||
+          isTranscribingRef.current
+        ) {
+          return;
+        }
+        if (stagedUrlRef.current) {
+          URL.revokeObjectURL(stagedUrlRef.current);
+        }
+        const objectUrl = URL.createObjectURL(draft.blob);
+        stagedUrlRef.current = objectUrl;
+        stagedStoryIdRef.current = targetStoryId;
+        setStagedStoryId(targetStoryId);
+        setStagedAudio({
+          blob: draft.blob,
+          url: objectUrl,
+          filename: draft.meta.filename,
+          mimeType: draft.meta.mimeType || draft.blob.type || 'audio/webm',
+          durationSec: draft.meta.durationSec,
+          sizeBytes: draft.meta.sizeBytes || draft.blob.size,
+          source: draft.source ?? 'recording',
+        });
+        setIsRecoveredDraft(true);
+      });
+    },
+    [],
+  );
 
   // Re-acquire Screen Wake Lock if user switches back to Safari/PWA mid-recording
   useEffect(() => {
@@ -361,6 +409,8 @@ export function DictationDock({
       URL.revokeObjectURL(stagedUrlRef.current);
       stagedUrlRef.current = null;
     }
+    stagedStoryIdRef.current = null;
+    setStagedStoryId(null);
     setStagedAudio(null);
     setIsRecoveredDraft(false);
     setHasFailedAttempt(false);
@@ -368,36 +418,12 @@ export function DictationDock({
     setSettingsOpen(false);
 
     if (!storyId) return;
-
-    void getPendingDraftAudio(storyId).then((draft) => {
-      if (
-        cancelled ||
-        !draft ||
-        !draft.blob ||
-        draft.blob.size === 0 ||
-        isRecordingRef.current ||
-        isTranscribingRef.current
-      ) {
-        return;
-      }
-      const objectUrl = URL.createObjectURL(draft.blob);
-      stagedUrlRef.current = objectUrl;
-      setStagedAudio({
-        blob: draft.blob,
-        url: objectUrl,
-        filename: draft.meta.filename,
-        mimeType: draft.meta.mimeType || draft.blob.type || 'audio/webm',
-        durationSec: draft.meta.durationSec,
-        sizeBytes: draft.meta.sizeBytes || draft.blob.size,
-        source: draft.source ?? 'recording',
-      });
-      setIsRecoveredDraft(true);
-    });
+    loadPendingDraftForStory(storyId, () => cancelled);
 
     return () => {
       cancelled = true;
     };
-  }, [storyId]);
+  }, [storyId, loadPendingDraftForStory]);
 
   useEffect(() => {
     return () => {
@@ -564,6 +590,8 @@ export function DictationDock({
         }
       };
 
+      const recordingStoryId = storyIdRef.current;
+
       recorder.onstop = async () => {
         const totalMs = isPausedRef.current
           ? accumulatedDurationMsRef.current
@@ -592,9 +620,9 @@ export function DictationDock({
         const objectUrl = URL.createObjectURL(blob);
         stagedUrlRef.current = objectUrl;
 
-        // Immediately back up the finished recording to IndexedDB before transcription starts
+        // Immediately back up the finished recording to IndexedDB under its originating story
         void savePendingDraftAudio(
-          storyIdRef.current,
+          recordingStoryId,
           blob,
           {
             filename,
@@ -605,6 +633,15 @@ export function DictationDock({
           'recording',
         );
 
+        if (storyIdRef.current !== recordingStoryId) {
+          URL.revokeObjectURL(objectUrl);
+          stagedUrlRef.current = null;
+          loadPendingDraftForStory(storyIdRef.current);
+          return;
+        }
+
+        stagedStoryIdRef.current = recordingStoryId;
+        setStagedStoryId(recordingStoryId);
         setIsRecoveredDraft(false);
         setHasFailedAttempt(false);
         setStagedAudio({
@@ -717,13 +754,14 @@ export function DictationDock({
     }
 
     clearStagedAudio(true);
+    const uploadStoryId = storyIdRef.current;
     const duration = await getAudioDuration(file, 0);
     const resolvedMime = file.type || 'audio/mpeg';
     const objectUrl = URL.createObjectURL(file);
     stagedUrlRef.current = objectUrl;
 
     void savePendingDraftAudio(
-      storyIdRef.current,
+      uploadStoryId,
       file,
       {
         filename: file.name,
@@ -734,6 +772,15 @@ export function DictationDock({
       'upload',
     );
 
+    if (storyIdRef.current !== uploadStoryId) {
+      URL.revokeObjectURL(objectUrl);
+      stagedUrlRef.current = null;
+      loadPendingDraftForStory(storyIdRef.current);
+      return;
+    }
+
+    stagedStoryIdRef.current = uploadStoryId;
+    setStagedStoryId(uploadStoryId);
     setIsRecoveredDraft(false);
     setHasFailedAttempt(false);
     setStagedAudio({
@@ -771,6 +818,9 @@ export function DictationDock({
 
   const handleTranscribeClick = async () => {
     if (!stagedAudio || isTranscribingRef.current) return;
+    const targetStoryId = stagedStoryIdRef.current || storyIdRef.current;
+    if (!targetStoryId) return;
+
     setErrorMessage(null);
     setSettingsOpen(false);
     isTranscribingRef.current = true;
@@ -780,15 +830,21 @@ export function DictationDock({
       stagedAudio.source === 'upload' ? uploadMode : 'full_polish';
     const controller = new AbortController();
     abortControllerRef.current = controller;
-    const targetStoryId = storyIdRef.current;
 
+    let switchedStoriesDuringRun = false;
     try {
-      await onTranscribe(stagedAudio, effectiveMode, controller.signal);
+      await onTranscribe(stagedAudio, effectiveMode, controller.signal, targetStoryId);
       // Only delete local IndexedDB draft backup after Firestore confirms the section save
       await deletePendingDraftAudio(targetStoryId);
       clearStagedAudio(false);
+      switchedStoriesDuringRun = storyIdRef.current !== targetStoryId;
     } catch (err) {
-      if ((err as { name?: string })?.name === 'AbortError') {
+      switchedStoriesDuringRun = storyIdRef.current !== targetStoryId;
+      if (switchedStoriesDuringRun) {
+        // User navigated to another story mid-transcription: keep Story A's draft safely in IndexedDB
+        // so it recovers when returning to Story A, and never show Story A's Retry card on Story B.
+        clearStagedAudio(false);
+      } else if ((err as { name?: string })?.name === 'AbortError') {
         setErrorMessage('Canceled. Your audio is still backed up locally below.');
       } else {
         setHasFailedAttempt(true);
@@ -802,6 +858,9 @@ export function DictationDock({
       abortControllerRef.current = null;
       isTranscribingRef.current = false;
       setIsTranscribing(false);
+      if (switchedStoriesDuringRun && storyIdRef.current) {
+        loadPendingDraftForStory(storyIdRef.current);
+      }
     }
   };
 
@@ -811,7 +870,13 @@ export function DictationDock({
     }
   };
 
-  const isUploadSummary = stagedAudio?.source === 'upload' && uploadMode === 'summarize_structure';
+  // Strictly bind staged audio & retry UI to its originating story unless actively transcribing
+  const visibleStagedAudio =
+    stagedAudio && (isTranscribing || !stagedStoryId || stagedStoryId === storyId)
+      ? stagedAudio
+      : null;
+  const isUploadSummary =
+    visibleStagedAudio?.source === 'upload' && uploadMode === 'summarize_structure';
   const mobileStyleText =
     style === 'refined_flow'
       ? refinedEnding === 'literary'
@@ -823,8 +888,13 @@ export function DictationDock({
       ? `Refined (${refinedEnding === 'literary' ? 'Literary' : 'Spoken'})`
       : STYLE_SHORT_LABELS[style];
   const compactModelText = MODEL_SHORT_LABELS[model];
-  const hideForMobileKeyboard =
-    isMobileTyping && !isRecording && !stagedAudio && !isTranscribing && !settingsOpen && !errorMessage;
+  const collapseIdleForMainTyping =
+    isMainTyping &&
+    !isRecording &&
+    !visibleStagedAudio &&
+    !isTranscribing &&
+    !settingsOpen &&
+    !errorMessage;
 
   const renderSettingsTriggerAndPopover = (compactWidthClass = 'max-w-[46%] sm:max-w-none') => (
     <div ref={settingsPopoverRef} className={`relative min-w-0 ${compactWidthClass}`}>
@@ -970,12 +1040,14 @@ export function DictationDock({
     </div>
   );
 
-  if (hideForMobileKeyboard) {
-    return null;
-  }
-
   return (
-    <div className="ios-crisp-dock safe-bottom-dock relative z-30 shrink-0 border-t border-[#E5E7EB] bg-white px-3 pt-2 shadow-[0_-4px_20px_rgba(17,24,39,0.05)] sm:border-t-0 sm:bg-white sm:px-6 sm:pb-4 sm:pt-2 sm:shadow-none">
+    <div
+      className={`ios-crisp-dock safe-bottom-dock w-full border-t border-[#E5E7EB] bg-white px-3 pt-2 shadow-[0_-4px_20px_rgba(17,24,39,0.05)] transition-[opacity,transform] duration-150 sm:border-t-0 sm:bg-white sm:px-6 sm:pt-2 sm:shadow-none ${
+        collapseIdleForMainTyping
+          ? 'pointer-events-none translate-y-full opacity-0 lg:pointer-events-auto lg:translate-y-0 lg:opacity-100'
+          : 'translate-y-0 opacity-100'
+      }`}
+    >
       <section
         aria-label="Voice dictation and audio upload dock"
         onDragOver={(e) => {
@@ -1084,7 +1156,7 @@ export function DictationDock({
               </button>
             </div>
           </div>
-        ) : stagedAudio ? (
+        ) : visibleStagedAudio ? (
           /* Staged Audio State: compact preview player, settings pill, Discard & Transcribe & Polish */
           <div className="space-y-2.5">
             {(isRecoveredDraft || hasFailedAttempt) && !isTranscribing && (
@@ -1122,18 +1194,18 @@ export function DictationDock({
             )}
 
             <AudioPlayerBar
-              directBlob={stagedAudio.blob}
-              directUrl={stagedAudio.url}
+              directBlob={visibleStagedAudio.blob}
+              directUrl={visibleStagedAudio.url}
               meta={{
-                filename: stagedAudio.filename,
-                mimeType: stagedAudio.mimeType,
-                durationSec: stagedAudio.durationSec,
-                sizeBytes: stagedAudio.sizeBytes,
+                filename: visibleStagedAudio.filename,
+                mimeType: visibleStagedAudio.mimeType,
+                durationSec: visibleStagedAudio.durationSec,
+                sizeBytes: visibleStagedAudio.sizeBytes,
               }}
               compact
             />
 
-            {stagedAudio.source === 'upload' && (
+            {visibleStagedAudio.source === 'upload' && (
               <div className="flex items-center justify-between gap-2">
                 <span className="text-[11px] font-medium text-[#6B7280]">Upload mode</span>
                 <div

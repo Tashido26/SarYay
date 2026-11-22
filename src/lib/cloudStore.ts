@@ -729,7 +729,6 @@ export async function createSectionInCloud(
     storagePath?: string;
     audioId?: string;
     audioMeta?: AudioMeta;
-    nextSectionCount: number;
   },
 ): Promise<void> {
   const sectionId = sanitizeId(params.sectionId, 'sec');
@@ -919,7 +918,6 @@ export async function moveSectionToTrashInCloud(
   storyId: string,
   storyTitle: string,
   section: ManuscriptSection,
-  nextActiveSectionCount: number,
 ): Promise<void> {
   const storyPath = `users/${uid}/stories/${storyId}`;
   const sectionPath = `${storyPath}/sections/${section.id}`;
@@ -1038,14 +1036,11 @@ export async function restoreSectionFromTrashInCloud(
     (s) => !s.isDeleted && s.title.trim().toLowerCase() === 'restored sections',
   );
   let targetStoryId: string;
-  let targetSectionCount: number;
 
   if (fallbackStory) {
     targetStoryId = fallbackStory.id;
-    targetSectionCount = (fallbackStory.sectionCount ?? 0) + 1;
   } else {
     targetStoryId = createId('story');
-    targetSectionCount = 1;
     await createStoryInCloud(uid, {
       storyId: targetStoryId,
       title: 'Restored Sections',

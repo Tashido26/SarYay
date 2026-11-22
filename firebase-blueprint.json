@@ -118,7 +118,7 @@
         },
         "mode": {
           "type": "string",
-          "enum": ["full_polish", "summarize_structure"],
+          "enum": ["full_polish", "summarize_structure", "proofread_only"],
           "description": "Processing mode used for this section."
         },
         "versions": {
@@ -238,7 +238,7 @@
         },
         "mode": {
           "type": "string",
-          "enum": ["full_polish", "summarize_structure"]
+          "enum": ["full_polish", "summarize_structure", "proofread_only"]
         },
         "versions": {
           "type": "array"

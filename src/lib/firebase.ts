@@ -7,8 +7,6 @@ import {
   type User,
 } from 'firebase/auth';
 import {
-  doc,
-  getDocFromServer,
   getFirestore,
   initializeFirestore,
   persistentLocalCache,
@@ -120,19 +118,6 @@ export function handleFirestoreError(
   console.error('Firestore Error: ', JSON.stringify(errInfo));
   throw new Error(JSON.stringify(errInfo));
 }
-
-async function testConnection(): Promise<void> {
-  if (!isFirebaseConfigured) return;
-  try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error('Please check your Firebase configuration.');
-    }
-  }
-}
-
-void testConnection();
 
 const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({

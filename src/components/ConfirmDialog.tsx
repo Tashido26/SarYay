@@ -83,7 +83,7 @@ export function ConfirmDialog({
             type="button"
             disabled={busy}
             onClick={onCancel}
-            className="rounded-lg border border-[#E5E7EB] bg-white px-3.5 py-2 text-xs font-medium text-[#374151] transition-colors hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:opacity-50"
+            className="rounded-lg border border-[#E5E7EB] bg-white px-3.5 py-2 text-xs font-medium text-[#374151] transition-colors hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81] disabled:opacity-50"
           >
             {cancelLabel}
           </button>
@@ -94,7 +94,7 @@ export function ConfirmDialog({
             className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-xs font-medium text-white transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 disabled:opacity-60 ${
               destructive
                 ? 'bg-[#DC2626] hover:bg-[#B91C1C] focus-visible:outline-[#DC2626]'
-                : 'bg-[#4338CA] hover:bg-[#3730A3] focus-visible:outline-[#4338CA]'
+                : 'bg-[#312E81] hover:bg-[#27246A] focus-visible:outline-[#312E81]'
             }`}
           >
             {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}

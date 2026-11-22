@@ -416,7 +416,7 @@ export const SectionBlock = memo(function SectionBlock({
                           opt.style,
                           opt.refinedEnding,
                           'text',
-                          'full_polish',
+                          undefined,
                         );
                       }}
                       className={`flex w-full items-center justify-between px-3 py-2 text-left text-xs transition-colors ${
@@ -501,7 +501,7 @@ export const SectionBlock = memo(function SectionBlock({
                                 opt.style,
                                 opt.refinedEnding,
                                 'audio',
-                                'full_polish',
+                                undefined,
                               );
                             }}
                             className="flex w-full items-center justify-between px-3.5 py-1.5 text-left text-[11px] text-[#4B5563] transition-colors hover:bg-[#EEF2FF]/60 hover:text-[#312E81]"

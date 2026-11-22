@@ -28,6 +28,14 @@
           (root.head || root).appendChild(style);
         }
 
+        function hideHostElement(host) {
+          if (!host || !host.style || host.id === 'root') return;
+          host.style.setProperty('display', 'none', 'important');
+          host.style.setProperty('visibility', 'hidden', 'important');
+          host.style.setProperty('opacity', '0', 'important');
+          host.style.setProperty('pointer-events', 'none', 'important');
+        }
+
         function hideBadgeInTree(root) {
           if (!root || !root.querySelectorAll) return false;
           injectStyle(root);
@@ -36,6 +44,7 @@
           for (const el of elements) {
             if (el.id === 'root') continue;
             if (el.shadowRoot && hideBadgeInTree(el.shadowRoot)) {
+              hideHostElement(el);
               found = true;
             }
             const tag = el.tagName;
@@ -45,7 +54,7 @@
               el.id === 'netlify-badge-container' ||
               el.hasAttribute?.('data-netlify-badge')
             ) {
-              el.style.setProperty('display', 'none', 'important');
+              hideHostElement(el);
               found = true;
               continue;
             }
@@ -62,7 +71,7 @@
                   target = p;
                   if (getComputedStyle(p).position === 'fixed') break;
                 }
-                target.style.setProperty('display', 'none', 'important');
+                hideHostElement(target);
                 found = true;
               }
             }
@@ -90,6 +99,7 @@
                 continue;
               }
               if (child.shadowRoot && hideBadgeInTree(child.shadowRoot)) {
+                hideHostElement(child);
                 badgeHidden = true;
               }
               if (hideBadgeInTree(child)) {
@@ -114,12 +124,14 @@
 
         const originalAttachShadow = Element.prototype.attachShadow;
         Element.prototype.attachShadow = function (options) {
+          const host = this;
           const shadow = originalAttachShadow.call(this, options);
           if (options && options.mode === 'open') {
-            if (!this.closest || !this.closest('#root')) {
+            if (!host.closest || !host.closest('#root')) {
               let shadowTimer = null;
               const checkShadow = () => {
                 if (hideBadgeInTree(shadow)) {
+                  hideHostElement(host);
                   badgeHidden = true;
                   shadowObserver.disconnect();
                 }

@@ -238,6 +238,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
   const pendingScrollSectionIdRef = useRef<string | null>(null);
   const bootstrappedRef = useRef<boolean>(false);
   const initialPurgeRanRef = useRef<boolean>(false);
+  const isPurgingTrashRef = useRef<boolean>(false);
 
   // Merge live top-30 stories with paginated older stories and newly created optimistic stories
   const loadedStories = useMemo(() => {
@@ -515,20 +516,17 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                   });
 
                   const legacySections = sortSectionsChronologically(legacyStory.sections || []);
-                  let secCount = 0;
                   for (let i = 0; i < legacySections.length; i++) {
                     const sec = legacySections[i];
                     const secId = createId('sec');
                     const versions = getSectionVersions(sec);
                     const initialVersion = versions[0];
-                    secCount += 1;
                     await createSectionInCloud(uid, newStoryId, {
                       sectionId: secId,
                       order: Date.parse(sec.createdAt) || Date.now() + i,
                       initialVersion,
                       audioId: sec.audioId,
                       audioMeta: sec.audioMeta,
-                      nextSectionCount: secCount,
                     });
                     if (versions.length > 1) {
                       await appendSectionVersionInCloud(uid, newStoryId, secId, versions);
@@ -603,14 +601,20 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     return () => unsubscribe();
   }, [uid]);
 
-  // Automatic 30-day permanent cleanup helper
+  // Automatic 30-day permanent cleanup helper (in-flight locked to prevent duplicate loops)
   const runExpiredTrashCleanup = useCallback(async () => {
+    if (isPurgingTrashRef.current) return;
     if (trashedStories.length === 0 && trashedSections.length === 0) return;
-    const purged = await purgeExpiredTrashInCloud(uid, trashedStories, trashedSections);
-    if (purged > 0) {
-      showToast(
-        `Auto-cleaned ${purged} expired Trash ${purged === 1 ? 'item' : 'items'} (> 30 days)`,
-      );
+    isPurgingTrashRef.current = true;
+    try {
+      const purged = await purgeExpiredTrashInCloud(uid, trashedStories, trashedSections);
+      if (purged > 0) {
+        showToast(
+          `Auto-cleaned ${purged} expired Trash ${purged === 1 ? 'item' : 'items'} (> 30 days)`,
+        );
+      }
+    } finally {
+      isPurgingTrashRef.current = false;
     }
   }, [uid, trashedStories, trashedSections, showToast]);
 
@@ -751,6 +755,93 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     };
   }, [outlineOpen]);
 
+  // Reset stuck iOS Safari / PWA visualViewport offset after virtual keyboard dismissal (focusout)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const isTouchOrMobile = () =>
+      window.innerWidth < 1024 ||
+      navigator.maxTouchPoints > 0 ||
+      /iP(ad|hone|od)/i.test(navigator.userAgent);
+
+    const isAnyEditableTarget = (el: EventTarget | null): boolean => {
+      if (!(el instanceof HTMLElement)) return false;
+      const tag = el.tagName;
+      if (tag === 'TEXTAREA') return true;
+      if (tag === 'INPUT') {
+        const type = ((el as HTMLInputElement).type || 'text').toLowerCase();
+        return !['button', 'checkbox', 'radio', 'range', 'file', 'submit', 'reset'].includes(type);
+      }
+      return el.isContentEditable;
+    };
+
+    const isMainEditableTarget = (el: EventTarget | null): boolean => {
+      if (!isAnyEditableTarget(el)) return false;
+      const mainEl = mainScrollRef.current;
+      return Boolean(mainEl && el instanceof Node && mainEl.contains(el));
+    };
+
+    let blurResetTimer: number | null = null;
+    let rafId: number | null = null;
+
+    const snapViewportToBottom = () => {
+      if (!isTouchOrMobile()) return;
+      if (isAnyEditableTarget(document.activeElement)) return;
+
+      const maxScrollY = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+      const currentY = window.scrollY;
+      const clampedY = Math.max(0, Math.min(currentY, maxScrollY));
+
+      // If iOS WebKit holds a non-zero visualViewport.offsetTop while window.scrollY is 0,
+      // a 1px nudge followed by an instant snap to 0 forces Safari to settle the fixed bottom dock.
+      const vv = window.visualViewport;
+      if (vv && vv.offsetTop > 0 && currentY === 0 && clampedY === 0) {
+        window.scrollTo(0, 1);
+        if (rafId !== null) window.cancelAnimationFrame(rafId);
+        rafId = window.requestAnimationFrame(() => {
+          rafId = null;
+          window.scrollTo({ top: 0, left: 0, behavior: 'instant' as ScrollBehavior });
+        });
+        return;
+      }
+
+      window.scrollTo({ top: clampedY, left: 0, behavior: 'instant' as ScrollBehavior });
+    };
+
+    const handleFocusOut = (e: FocusEvent) => {
+      if (!isTouchOrMobile() || !isMainEditableTarget(e.target)) return;
+      if (blurResetTimer !== null) {
+        window.clearTimeout(blurResetTimer);
+      }
+      blurResetTimer = window.setTimeout(() => {
+        blurResetTimer = null;
+        snapViewportToBottom();
+      }, 60);
+    };
+
+    const handleVisualViewportResize = () => {
+      if (!isTouchOrMobile() || isAnyEditableTarget(document.activeElement)) return;
+      const vv = window.visualViewport;
+      const maxScrollY = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+      if ((vv && vv.offsetTop > 0) || window.scrollY > maxScrollY) {
+        snapViewportToBottom();
+      }
+    };
+
+    document.addEventListener('focusout', handleFocusOut);
+    window.visualViewport?.addEventListener('resize', handleVisualViewportResize);
+
+    return () => {
+      document.removeEventListener('focusout', handleFocusOut);
+      window.visualViewport?.removeEventListener('resize', handleVisualViewportResize);
+      if (blurResetTimer !== null) {
+        window.clearTimeout(blurResetTimer);
+      }
+      if (rafId !== null) {
+        window.cancelAnimationFrame(rafId);
+      }
+    };
+  }, []);
+
   // Count non-empty glossary lines/items for the subtle toggle badge
   const glossaryEntryCount = useMemo(() => {
     const raw = glossaryDraft.trim();
@@ -877,6 +968,13 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
         }
       } catch (err) {
         if (activeSessionIdRef.current === targetStoryId) {
+          // Restore unsaved keystrokes on hard write failure unless newer edits already superseded them
+          if (sectionDraftsRef.current[sectionId] === undefined) {
+            sectionDraftsRef.current = { ...sectionDraftsRef.current, [sectionId]: draftText };
+            setSectionDrafts((prev) =>
+              prev[sectionId] === undefined ? { ...prev, [sectionId]: draftText } : prev,
+            );
+          }
           setSectionSaveStatus((prev) => ({ ...prev, [sectionId]: 'error' }));
         }
         setGlobalError(formatCloudErrorMessage(err));
@@ -1168,14 +1266,12 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       } else if (pendingConfirm.kind === 'trash_section') {
         if (!activeSession) return;
         await flushSectionDraft(pendingConfirm.section.id);
-        const nextCount = Math.max(0, sectionsRef.current.length - 1);
         await trackSync(() =>
           moveSectionToTrashInCloud(
             uid,
             activeSession.id,
             titleDraft || activeSession.title,
             pendingConfirm.section,
-            nextCount,
           ),
         );
         showToast('Moved section to Trash (recoverable for 30 days)');
@@ -1187,9 +1283,6 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
         showToast('Story permanently deleted');
       } else if (pendingConfirm.kind === 'delete_section_forever') {
         setTrashBusyItemId(pendingConfirm.section.id);
-        if (pendingConfirm.section.audioId) {
-          deleteAudioClip(pendingConfirm.section.audioId).catch(() => undefined);
-        }
         await trackSync(() =>
           permanentlyDeleteSectionFromTrashInCloud(uid, pendingConfirm.section),
         );
@@ -1275,16 +1368,26 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
     staged: StagedAudio,
     mode: ProcessingMode,
     signal: AbortSignal,
+    explicitStoryId?: string,
   ) => {
-    if (!activeSession) return;
+    const targetStoryId = explicitStoryId || activeSession?.id || '';
+    const targetStory =
+      loadedStories.find((s) => s.id === targetStoryId) ??
+      (activeSession?.id === targetStoryId ? activeSession : undefined);
+    if (!targetStoryId || !targetStory) return;
+
     setGlobalError(null);
-    const targetStoryId = activeSession.id;
-    const targetStyle = activeSession.defaultStyle;
-    const targetEnding = activeRefinedEnding;
-    const targetModel = activeSession.defaultModel;
-    const activeGlossary = (glossaryDraftRef.current || activeSession.glossary || '').trim();
+    const isTargetCurrentlyOpen = activeSessionIdRef.current === targetStoryId;
+    const targetStyle = targetStory.defaultStyle;
+    const targetEnding: VoiceEnding = targetStory.defaultRefinedEnding ?? 'colloquial';
+    const targetModel = targetStory.defaultModel;
+    const activeGlossary = (
+      isTargetCurrentlyOpen
+        ? glossaryDraftRef.current || targetStory.glossary || ''
+        : targetStory.glossary || ''
+    ).trim();
     const previousContext =
-      mode === 'summarize_structure'
+      mode === 'summarize_structure' || !isTargetCurrentlyOpen
         ? undefined
         : extractPreviousParagraphContext(orderedSections);
 
@@ -1326,7 +1429,6 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       usage: result.usage,
     };
 
-    const nextSectionCount = sectionsRef.current.length + 1;
     try {
       await trackSync(() =>
         createSectionInCloud(uid, targetStoryId, {
@@ -1335,7 +1437,6 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
           initialVersion,
           audioId,
           audioMeta,
-          nextSectionCount,
         }),
       );
     } catch (cloudErr) {
@@ -1343,7 +1444,9 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
       throw cloudErr;
     }
 
-    pendingScrollSectionIdRef.current = sectionId;
+    if (activeSessionIdRef.current === targetStoryId) {
+      pendingScrollSectionIdRef.current = sectionId;
+    }
 
     const styleDesc = formatCompactStyleLabel(targetStyle, targetEnding);
     showToast(
@@ -1433,7 +1536,8 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
           sectionsRef.current.find((s) => s.id === section.id) ?? section;
         const chosenModel = activeSession?.defaultModel ?? 'gemini-2.5-flash';
         const effectiveMode: ProcessingMode =
-          overrideMode ?? latestBeforeCall.mode ?? 'full_polish';
+          overrideMode ??
+          (latestBeforeCall.mode === 'summarize_structure' ? 'summarize_structure' : 'full_polish');
         const resolvedEnding: VoiceEnding = targetEnding ?? activeRefinedEnding;
         const currentActiveText = getActiveSectionVersion(latestBeforeCall).text;
         const activeGlossary = (glossaryDraftRef.current || activeSession?.glossary || '').trim();
@@ -1818,7 +1922,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                     onClick={handleScrollToTop}
                     title="Scroll to top (Title & Glossary)"
                     aria-label="Scroll to top of story"
-                    className="-mx-1.5 min-w-0 truncate rounded-md px-1.5 py-1 text-left font-medium text-[#374151] transition-colors duration-150 hover:bg-[#F3F4F6] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA]"
+                    className="-mx-1.5 min-w-0 truncate rounded-md px-1.5 py-1 text-left font-medium text-[#374151] transition-colors duration-150 hover:bg-[#F3F4F6] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81]"
                   >
                     {titleDraft || activeSession.title || 'Untitled Story'}
                   </button>
@@ -1885,7 +1989,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                     onClick={handleCopyFullStory}
                     aria-label={copiedFull ? 'Copied full story' : 'Copy full story'}
                     title="Copy full story"
-                    className="inline-flex h-8 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-2 text-xs font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-not-allowed disabled:opacity-45 sm:h-auto sm:px-3 sm:py-1.5"
+                    className="inline-flex h-8 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-2 text-xs font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81] disabled:cursor-not-allowed disabled:opacity-45 sm:h-auto sm:px-3 sm:py-1.5"
                   >
                     {copiedFull ? (
                       <>
@@ -1906,7 +2010,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                     onClick={handleExportTxt}
                     aria-label="Export as .txt"
                     title="Export full story as plain text (.txt)"
-                    className="inline-flex h-8 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-2 text-xs font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-not-allowed disabled:opacity-45 sm:h-auto sm:px-3 sm:py-1.5"
+                    className="inline-flex h-8 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-2 text-xs font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81] disabled:cursor-not-allowed disabled:opacity-45 sm:h-auto sm:px-3 sm:py-1.5"
                   >
                     <FileText className="hidden h-3.5 w-3.5 sm:inline" />
                     <span>.txt</span>
@@ -1918,7 +2022,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                     onClick={handleExportMd}
                     aria-label="Export as .md"
                     title="Export full session sequentially as Markdown (.md)"
-                    className="inline-flex h-8 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-2 text-xs font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-not-allowed disabled:opacity-45 sm:h-auto sm:px-3 sm:py-1.5"
+                    className="inline-flex h-8 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-2 text-xs font-medium text-[#374151] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] hover:text-[#111827] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81] disabled:cursor-not-allowed disabled:opacity-45 sm:h-auto sm:px-3 sm:py-1.5"
                   >
                     <FileDown className="hidden h-3.5 w-3.5 sm:inline" />
                     <span className="hidden sm:inline">Export as .md</span>
@@ -1934,7 +2038,9 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
         <main
           ref={mainScrollRef}
           className={`flex-1 overflow-y-auto bg-white ${
-            activeView === 'story' && activeSession ? 'pb-6' : 'safe-bottom-scroll'
+            activeView === 'story' && activeSession
+              ? 'safe-bottom-with-dock'
+              : 'safe-bottom-scroll'
           }`}
         >
           {globalError && (activeView === 'trash' || !activeSession) && (
@@ -2285,50 +2391,55 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
           )}
         </main>
 
-        {/* Always-visible error banner anchored right above the Sticky Bottom Dock when a story is open */}
-        {activeView === 'story' && activeSession && globalError && (
-          <div className="shrink-0 bg-white px-3 pt-2 sm:px-6">
-            <div
-              role="alert"
-              className="mx-auto flex max-w-3xl items-start justify-between gap-2.5 rounded-xl border border-[#FECACA] bg-[#FEF2F2] px-3.5 py-2.5 text-xs text-[#991B1B]"
-            >
-              <div className="flex min-w-0 flex-1 items-start gap-2">
-                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-[#DC2626]" />
-                <p className="min-w-0 flex-1 break-words leading-relaxed [overflow-wrap:anywhere]">
-                  {globalError}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setGlobalError(null)}
-                aria-label="Dismiss error"
-                className="shrink-0 rounded p-0.5 text-[#991B1B] hover:bg-[#FEE2E2]"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Sleek Sticky Bottom Dictation Dock anchored cleanly to bottom of viewport */}
+        {/* True viewport-anchored Fixed Bottom Dock (+ always-visible error banner) */}
         {activeView === 'story' && activeSession && (
-          <DictationDock
-            storyId={activeSession.id}
-            storyTitle={titleDraft || activeSession.title}
-            style={activeSession.defaultStyle}
-            refinedEnding={activeRefinedEnding}
-            model={activeSession.defaultModel}
-            onStyleChange={(nextStyle) => {
-              void handleStyleChange(nextStyle);
-            }}
-            onRefinedEndingChange={(nextEnding) => {
-              void handleRefinedEndingChange(nextEnding);
-            }}
-            onModelChange={(nextModel) => {
-              void handleModelChange(nextModel);
-            }}
-            onTranscribe={handleTranscribeAudio}
-          />
+          <div
+            className={`fixed inset-x-0 bottom-0 z-30 transition-[left] duration-200 ${
+              sidebarOpen ? 'lg:left-[268px]' : 'lg:left-0'
+            }`}
+          >
+            {globalError && (
+              <div className="bg-white px-3 pt-2 sm:px-6">
+                <div
+                  role="alert"
+                  className="mx-auto flex max-w-3xl items-start justify-between gap-2.5 rounded-xl border border-[#FECACA] bg-[#FEF2F2] px-3.5 py-2.5 text-xs text-[#991B1B]"
+                >
+                  <div className="flex min-w-0 flex-1 items-start gap-2">
+                    <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-[#DC2626]" />
+                    <p className="min-w-0 flex-1 break-words leading-relaxed [overflow-wrap:anywhere]">
+                      {globalError}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setGlobalError(null)}
+                    aria-label="Dismiss error"
+                    className="shrink-0 rounded p-0.5 text-[#991B1B] hover:bg-[#FEE2E2]"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <DictationDock
+              storyId={activeSession.id}
+              storyTitle={titleDraft || activeSession.title}
+              style={activeSession.defaultStyle}
+              refinedEnding={activeRefinedEnding}
+              model={activeSession.defaultModel}
+              onStyleChange={(nextStyle) => {
+                void handleStyleChange(nextStyle);
+              }}
+              onRefinedEndingChange={(nextEnding) => {
+                void handleRefinedEndingChange(nextEnding);
+              }}
+              onModelChange={(nextModel) => {
+                void handleModelChange(nextModel);
+              }}
+              onTranscribe={handleTranscribeAudio}
+            />
+          </div>
         )}
       </div>
 

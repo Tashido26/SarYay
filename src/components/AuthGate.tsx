@@ -145,7 +145,7 @@ export function AuthGate({ children }: AuthGateProps) {
     return (
       <div className="safe-top safe-bottom flex min-h-[100dvh] w-full flex-col items-center justify-center bg-white px-6 text-[#111827]">
         <div className="flex flex-col items-center gap-3.5 text-center">
-          <Loader2 className="h-6 w-6 animate-spin text-[#4338CA]" aria-hidden="true" />
+          <Loader2 className="h-6 w-6 animate-spin text-[#312E81]" aria-hidden="true" />
           <p className="text-sm font-medium text-[#6B7280]">Checking workspace access…</p>
         </div>
       </div>
@@ -186,11 +186,11 @@ export function AuthGate({ children }: AuthGateProps) {
             type="button"
             disabled={isSigningIn || !isFirebaseConfigured}
             onClick={handleGoogleSignIn}
-            className="flex w-full items-center justify-center gap-3 whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-5 py-3 text-sm font-medium text-[#111827] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4338CA] disabled:cursor-wait disabled:opacity-65"
+            className="flex w-full items-center justify-center gap-3 whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-5 py-3 text-sm font-medium text-[#111827] transition-colors duration-150 hover:border-[#D1D5DB] hover:bg-[#F9FAFB] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#312E81] disabled:cursor-wait disabled:opacity-65"
           >
             {isSigningIn ? (
               <>
-                <Loader2 className="h-4 w-4 animate-spin text-[#4338CA]" />
+                <Loader2 className="h-4 w-4 animate-spin text-[#312E81]" />
                 <span>Signing in…</span>
               </>
             ) : (
