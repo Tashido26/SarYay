@@ -2171,7 +2171,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
               )}
             </div>
           ) : (
-            <div className="mx-auto max-w-[780px] px-5 py-6 sm:px-10 sm:py-8">
+            <div className="mx-auto max-w-[780px] px-5 pt-6 pb-2 sm:px-10 sm:pt-8 sm:pb-3">
               {/* Editable story title & minimal metadata (+ subtle cumulative token summary) */}
               <div className="mb-5">
                 <input
@@ -2363,7 +2363,7 @@ function StudioWorkspace({ user, onSignOut }: StudioWorkspaceProps) {
                 </div>
               ) : (
                 /* Manuscript Sections Stream */
-                <div className="space-y-6 pb-8">
+                <div className="space-y-6">
                   {orderedSections.map((section, idx) => (
                     <div
                       key={section.id}

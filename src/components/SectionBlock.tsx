@@ -82,6 +82,7 @@ export const SectionBlock = memo(function SectionBlock({
   onCopyText,
 }: SectionBlockProps) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const lastMeasuredWidthRef = useRef<number>(0);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const menuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const [showAudio, setShowAudio] = useState(false);
@@ -125,19 +126,35 @@ export const SectionBlock = memo(function SectionBlock({
     };
   }, [hasCloudAudio, section.audioId]);
 
-  const syncTextareaMinHeight = useCallback(() => {
+  const syncTextareaHeight = useCallback(() => {
     const el = textareaRef.current;
     if (!el) return;
-    // Let the CSS Grid mirror compute natural height first, then guard against any script-shaping delta
+
+    // Preserve <main> scrollTop so collapsing height to 0px for measurement never jumps the scroll viewport
+    const scrollContainer = el.closest('main');
+    const savedScrollTop = scrollContainer ? scrollContainer.scrollTop : null;
+
     el.style.minHeight = '';
-    if (el.scrollHeight > el.clientHeight + 1) {
-      el.style.minHeight = `${el.scrollHeight + 4}px`;
+    el.style.height = '0px';
+
+    const computed = window.getComputedStyle(el);
+    const borderY =
+      (parseFloat(computed.borderTopWidth) || 0) + (parseFloat(computed.borderBottomWidth) || 0);
+    const nextHeight = Math.max(Math.ceil(el.scrollHeight + borderY), 64);
+
+    el.style.height = `${nextHeight}px`;
+    if (el.scrollTop !== 0) {
+      el.scrollTop = 0;
+    }
+
+    if (scrollContainer && savedScrollTop !== null && scrollContainer.scrollTop !== savedScrollTop) {
+      scrollContainer.scrollTop = savedScrollTop;
     }
   }, []);
 
   useLayoutEffect(() => {
-    syncTextareaMinHeight();
-  }, [activeVersion.text, activeVersionIndex, syncTextareaMinHeight]);
+    syncTextareaHeight();
+  }, [activeVersion.text, activeVersionIndex, syncTextareaHeight]);
 
   useEffect(() => {
     const el = textareaRef.current;
@@ -148,18 +165,29 @@ export const SectionBlock = memo(function SectionBlock({
       if (rafId !== null) window.cancelAnimationFrame(rafId);
       rafId = window.requestAnimationFrame(() => {
         rafId = null;
-        syncTextareaMinHeight();
+        syncTextareaHeight();
       });
     };
 
-    // Re-check when container width changes (e.g. sidebar open/collapse, window resize, orientation change)
+    // Observe the parent container width only so height updates never re-trigger ResizeObserver loops
+    const observeTarget = el.parentElement ?? el;
+    lastMeasuredWidthRef.current = Math.round(observeTarget.getBoundingClientRect().width);
+
     let observer: ResizeObserver | null = null;
     if (typeof ResizeObserver !== 'undefined') {
-      observer = new ResizeObserver(scheduleSync);
-      observer.observe(el);
+      observer = new ResizeObserver((entries) => {
+        const entry = entries[0];
+        if (!entry) return;
+        const nextWidth = Math.round(entry.contentRect.width);
+        if (nextWidth > 0 && nextWidth !== lastMeasuredWidthRef.current) {
+          lastMeasuredWidthRef.current = nextWidth;
+          scheduleSync();
+        }
+      });
+      observer.observe(observeTarget);
     }
 
-    // Re-check once web fonts (e.g. Noto Sans Myanmar) finish loading
+    // Re-measure accurately once web fonts (e.g. Noto Sans Myanmar) finish loading
     let cancelled = false;
     if (typeof document !== 'undefined' && document.fonts?.ready) {
       void document.fonts.ready.then(() => {
@@ -176,7 +204,7 @@ export const SectionBlock = memo(function SectionBlock({
         window.cancelAnimationFrame(rafId);
       }
     };
-  }, [syncTextareaMinHeight]);
+  }, [syncTextareaHeight]);
 
   useEffect(() => {
     if (!menuOpen) {
@@ -233,7 +261,7 @@ export const SectionBlock = memo(function SectionBlock({
 
   return (
     <article
-      className="group border-t border-[#E5E7EB] pt-7 pb-3 first:border-t-0 first:pt-2"
+      className="group border-t border-[#E5E7EB] pt-7 pb-1 first:border-t-0 first:pt-2"
       aria-label={`Manuscript section ${index + 1}`}
     >
       {/* Quiet unboxed metadata header + version switcher + section actions */}
@@ -544,21 +572,15 @@ export const SectionBlock = memo(function SectionBlock({
         </div>
       ) : null}
 
-      {/* Editable Burmese/English literary prose editor (CSS Grid mirror keeps all lines unclipped) */}
-      <div className="grid rounded-lg transition-colors duration-150 focus-within:bg-[#FAFAFC]">
-        <div
-          aria-hidden="true"
-          className="font-manuscript pointer-events-none invisible col-start-1 row-start-1 min-h-[96px] w-full whitespace-pre-wrap break-words rounded-lg border border-transparent px-2.5 pt-2 pb-3 text-[16.5px] [overflow-wrap:break-word]"
-        >
-          {`${activeVersion.text}\u200B`}
-        </div>
+      {/* Editable Burmese/English literary prose editor (direct auto-sized textarea avoids iOS WebKit clipping) */}
+      <div className="rounded-lg transition-colors duration-150 focus-within:bg-[#FAFAFC]">
         <textarea
           ref={textareaRef}
           value={activeVersion.text}
           onChange={handleTextChange}
-          onFocus={syncTextareaMinHeight}
+          onFocus={syncTextareaHeight}
           onBlur={() => {
-            syncTextareaMinHeight();
+            syncTextareaHeight();
             onFlushContent?.(section.id);
           }}
           disabled={isReprocessing}
@@ -566,7 +588,7 @@ export const SectionBlock = memo(function SectionBlock({
           spellCheck={false}
           aria-label={`Editable prose for section ${index + 1}, version ${activeVersionIndex + 1} of ${versions.length}`}
           placeholder="Your transcribed manuscript prose will appear here…"
-          className="font-manuscript col-start-1 row-start-1 block h-full min-h-[96px] w-full resize-none overflow-hidden whitespace-pre-wrap break-words rounded-lg border border-transparent bg-transparent px-2.5 pt-2 pb-3 text-[16.5px] text-[#111827] placeholder:text-[#9CA3AF] [overflow-wrap:break-word] focus:border-[#E5E7EB] focus:outline-none disabled:opacity-60"
+          className="font-manuscript box-border block w-full resize-none overflow-hidden whitespace-pre-wrap break-words rounded-lg border border-transparent bg-transparent px-2.5 pt-2 pb-2 text-[16.5px] text-[#111827] placeholder:text-[#9CA3AF] [overflow-wrap:break-word] focus:border-[#E5E7EB] focus:outline-none disabled:opacity-60"
         />
       </div>
 
