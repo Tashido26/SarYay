@@ -68,6 +68,83 @@ interface DictationDockProps {
 
 const ACCEPTED_AUDIO_EXTENSIONS = ['.mp3', '.wav', '.m4a', '.webm', '.ogg'];
 const MAX_UPLOAD_BYTES = 60 * 1024 * 1024;
+const MAX_SILENCE_CHECK_BYTES = 12 * 1024 * 1024; // Avoid decoding huge uploaded lectures into client RAM
+const SILENCE_PEAK_THRESHOLD = 0.012; // ~ -38 dBFS minimum peak for audible speech
+const SILENCE_RMS_THRESHOLD = 0.0035; // ~ -49 dBFS minimum 100ms frame RMS
+const NO_SPEECH_ERROR_MESSAGE =
+  'No clear speech detected. Please speak closer to the microphone and try again.';
+
+async function hasAudibleSpeechInBlob(blob: Blob): Promise<boolean> {
+  if (typeof window === 'undefined' || blob.size === 0) return true;
+  if (blob.size > MAX_SILENCE_CHECK_BYTES) return true;
+
+  const AudioCtx =
+    window.AudioContext ||
+    (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioCtx) return true;
+
+  let ctx: AudioContext | null = null;
+  try {
+    const arrayBuffer = await blob.arrayBuffer();
+    ctx = new AudioCtx();
+    const audioBuffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
+    const channelCount = audioBuffer.numberOfChannels;
+    const totalSamples = audioBuffer.length;
+    if (channelCount === 0 || totalSamples === 0) return false;
+
+    // Evaluate ~100ms frames with lightweight striding so brief quiet speech passes while dead silence or single mic clicks are caught
+    const frameSize = Math.max(1, Math.floor(audioBuffer.sampleRate * 0.1));
+    const stride = totalSamples > 240_000 ? 4 : 1;
+
+    let globalPeak = 0;
+    let maxFrameRms = 0;
+    let audibleFrameCount = 0;
+
+    for (let ch = 0; ch < channelCount; ch++) {
+      const data = audioBuffer.getChannelData(ch);
+      for (let start = 0; start < totalSamples; start += frameSize) {
+        const end = Math.min(totalSamples, start + frameSize);
+        let sumSq = 0;
+        let sampleCount = 0;
+        for (let i = start; i < end; i += stride) {
+          const v = data[i];
+          const abs = v < 0 ? -v : v;
+          if (abs > globalPeak) globalPeak = abs;
+          sumSq += v * v;
+          sampleCount++;
+        }
+        if (sampleCount > 0) {
+          const frameRms = Math.sqrt(sumSq / sampleCount);
+          if (frameRms > maxFrameRms) maxFrameRms = frameRms;
+          if (frameRms >= SILENCE_RMS_THRESHOLD) {
+            audibleFrameCount++;
+          }
+        }
+      }
+      // Early exit as soon as we confirm clear speech energy in any channel
+      if (
+        globalPeak >= SILENCE_PEAK_THRESHOLD &&
+        maxFrameRms >= SILENCE_RMS_THRESHOLD &&
+        audibleFrameCount > 0
+      ) {
+        return true;
+      }
+    }
+
+    return (
+      globalPeak >= SILENCE_PEAK_THRESHOLD &&
+      maxFrameRms >= SILENCE_RMS_THRESHOLD &&
+      audibleFrameCount > 0
+    );
+  } catch {
+    // If browser cannot decode this specific audio container client-side, allow upload rather than falsely blocking
+    return true;
+  } finally {
+    if (ctx) {
+      ctx.close().catch(() => undefined);
+    }
+  }
+}
 
 function isAppleSafariBrowser(): boolean {
   if (typeof navigator === 'undefined') return false;
@@ -147,6 +224,7 @@ export function DictationDock({
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
+  const processedStreamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const timerIntervalRef = useRef<number | null>(null);
   const accumulatedDurationMsRef = useRef<number>(0);
@@ -309,6 +387,12 @@ export function DictationDock({
       audioContextRef.current = null;
     }
     analyserRef.current = null;
+    if (processedStreamRef.current) {
+      for (const track of processedStreamRef.current.getTracks()) {
+        track.stop();
+      }
+      processedStreamRef.current = null;
+    }
     if (mediaStreamRef.current) {
       for (const track of mediaStreamRef.current.getTracks()) {
         track.stop();
@@ -547,25 +631,59 @@ export function DictationDock({
 
       mediaStreamRef.current = stream;
 
+      // Route microphone through lightweight Web Audio speech clarity chain:
+      // 85Hz high-pass filter (cuts rumble/fan hum) -> gentle +4dB gain -> soft-knee DynamicsCompressorNode (lifts quiet/whispered speech without clipping)
+      let recordingStream: MediaStream = stream;
       try {
         const AudioCtx =
           window.AudioContext ||
-          (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+          (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
         if (AudioCtx) {
           const audioCtx = new AudioCtx();
           if (audioCtx.state === 'suspended') {
-            audioCtx.resume().catch(() => undefined);
+            await audioCtx.resume().catch(() => undefined);
           }
           const source = audioCtx.createMediaStreamSource(stream);
+
+          const highPass = audioCtx.createBiquadFilter();
+          highPass.type = 'highpass';
+          highPass.frequency.value = 85;
+          highPass.Q.value = 0.707;
+
+          const inputGain = audioCtx.createGain();
+          inputGain.gain.value = 1.6; // ~+4 dB gentle lift for quiet/whispered speech
+
+          const compressor = audioCtx.createDynamicsCompressor();
+          compressor.threshold.value = -24;
+          compressor.knee.value = 24;
+          compressor.ratio.value = 4;
+          compressor.attack.value = 0.005;
+          compressor.release.value = 0.22;
+
           const analyser = audioCtx.createAnalyser();
           analyser.fftSize = 128;
           analyser.smoothingTimeConstant = 0.78;
-          source.connect(analyser);
+
+          source.connect(highPass);
+          highPass.connect(inputGain);
+          inputGain.connect(compressor);
+          compressor.connect(analyser);
+
+          if (typeof audioCtx.createMediaStreamDestination === 'function') {
+            const destination = audioCtx.createMediaStreamDestination();
+            compressor.connect(destination);
+            if (destination.stream.getAudioTracks().length > 0) {
+              processedStreamRef.current = destination.stream;
+              recordingStream = destination.stream;
+            }
+          }
+
           audioContextRef.current = audioCtx;
           analyserRef.current = analyser;
         }
       } catch {
-        // Optional waveform
+        // Fallback seamlessly to raw microphone stream if Web Audio processing is unsupported
+        recordingStream = stream;
       }
 
       const appleSafari = isAppleSafariBrowser();
@@ -573,10 +691,10 @@ export function DictationDock({
       let recorder: MediaRecorder;
       try {
         recorder = mimeType
-          ? new MediaRecorder(stream, { mimeType })
-          : new MediaRecorder(stream);
+          ? new MediaRecorder(recordingStream, { mimeType })
+          : new MediaRecorder(recordingStream);
       } catch {
-        recorder = new MediaRecorder(stream);
+        recorder = new MediaRecorder(recordingStream);
       }
       mediaRecorderRef.current = recorder;
       chunksRef.current = [];
@@ -825,6 +943,23 @@ export function DictationDock({
     setSettingsOpen(false);
     isTranscribingRef.current = true;
     setIsTranscribing(true);
+
+    // Pre-upload silence / low-audio guard: avoid charging Gemini tokens on silent or inaudible clips
+    const hasSpeech = await hasAudibleSpeechInBlob(stagedAudio.blob);
+    if (!hasSpeech) {
+      isTranscribingRef.current = false;
+      setIsTranscribing(false);
+      if (storyIdRef.current !== targetStoryId) {
+        clearStagedAudio(false);
+        if (storyIdRef.current) {
+          loadPendingDraftForStory(storyIdRef.current);
+        }
+      } else {
+        setHasFailedAttempt(false);
+        setErrorMessage(NO_SPEECH_ERROR_MESSAGE);
+      }
+      return;
+    }
 
     const effectiveMode: ProcessingMode =
       stagedAudio.source === 'upload' ? uploadMode : 'full_polish';
