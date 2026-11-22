@@ -164,42 +164,44 @@ export function TrashBinView({
                       key={story.id}
                       className="rounded-xl border border-[#E5E7EB] bg-white p-4"
                     >
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2">
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="min-w-0 sm:flex-1">
+                          <div className="flex min-w-0 items-center gap-2">
                             <FileText
                               className="h-4 w-4 shrink-0 text-[#6B7280]"
                               aria-hidden="true"
                             />
-                            <h3 className="truncate text-sm font-semibold text-[#111827]">
+                            <h3 className="min-w-0 flex-1 truncate text-sm font-semibold text-[#111827]">
                               {story.title || 'Untitled Story'}
                             </h3>
                           </div>
-                          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-[#6B7280] tabular-nums">
-                            <span>
+                          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-[#6B7280] tabular-nums">
+                            <span className="whitespace-nowrap">
                               {story.sectionCount ?? 0}{' '}
                               {(story.sectionCount ?? 0) === 1 ? 'section' : 'sections'}
                             </span>
                             <span aria-hidden="true">·</span>
-                            <span className="font-medium text-[#B45309]">
+                            <span className="whitespace-nowrap font-medium text-[#B45309]">
                               {formatDaysLeft(story.deletedAt)}
                             </span>
                             {story.deletedAt ? (
                               <>
                                 <span aria-hidden="true">·</span>
-                                <span>Deleted {formatTimestamp(story.deletedAt)}</span>
+                                <span className="whitespace-nowrap">
+                                  Deleted {formatTimestamp(story.deletedAt)}
+                                </span>
                               </>
                             ) : null}
                           </div>
                         </div>
 
-                        <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+                        <div className="flex shrink-0 flex-wrap items-center gap-1.5 sm:justify-end">
                           <button
                             type="button"
                             onClick={() => {
                               void handleToggleStoryPreview(story.id);
                             }}
-                            className="inline-flex items-center gap-1 rounded-md border border-[#E5E7EB] bg-white px-2.5 py-1.5 text-xs font-medium text-[#4B5563] transition-colors hover:bg-[#F9FAFB] hover:text-[#111827]"
+                            className="inline-flex items-center gap-1 whitespace-nowrap rounded-md border border-[#E5E7EB] bg-white px-2.5 py-1.5 text-xs font-medium text-[#4B5563] transition-colors hover:bg-[#F9FAFB] hover:text-[#111827]"
                           >
                             <span>{isExpanded ? 'Hide' : 'Preview'}</span>
                             {isExpanded ? (
@@ -212,7 +214,7 @@ export function TrashBinView({
                             type="button"
                             disabled={isBusy}
                             onClick={() => onRestoreStory(story)}
-                            className="inline-flex items-center gap-1.5 rounded-md border border-[#E5E7EB] bg-white px-2.5 py-1.5 text-xs font-medium text-[#312E81] transition-colors hover:border-[#C7D2FE] hover:bg-[#EEF2FF] disabled:opacity-50"
+                            className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border border-[#E5E7EB] bg-white px-2.5 py-1.5 text-xs font-medium text-[#312E81] transition-colors hover:border-[#C7D2FE] hover:bg-[#EEF2FF] disabled:opacity-50"
                           >
                             {isBusy ? (
                               <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -225,7 +227,7 @@ export function TrashBinView({
                             type="button"
                             disabled={isBusy}
                             onClick={() => onRequestDeleteStoryForever(story)}
-                            className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-[#DC2626] transition-colors hover:bg-[#FEE2E2] disabled:opacity-50"
+                            className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium text-[#DC2626] transition-colors hover:bg-[#FEE2E2] disabled:opacity-50"
                           >
                             <Trash2 className="h-3.5 w-3.5" />
                             <span>Delete Forever</span>
@@ -370,37 +372,44 @@ export function TrashBinView({
                       key={sec.id}
                       className="rounded-xl border border-[#E5E7EB] bg-white p-4"
                     >
-                      <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
-                        <div className="min-w-0 flex-1">
-                          <div className="flex flex-wrap items-center gap-1.5 text-xs text-[#6B7280] tabular-nums">
-                            <span className="font-semibold text-[#111827]">
-                              From: {sec.parentStoryTitle || 'Untitled Story'}
-                            </span>
-                            <span aria-hidden="true">·</span>
-                            <span>
+                      <div className="mb-3 flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+                        <div className="min-w-0 sm:flex-1">
+                          <h3 className="truncate text-sm font-semibold text-[#111827]">
+                            From: {sec.parentStoryTitle || 'Untitled Story'}
+                          </h3>
+                          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-[#6B7280] tabular-nums">
+                            <span className="whitespace-nowrap">
                               {formatCompactStyleLabel(activeVer.style, activeVer.refinedEnding)}
                             </span>
                             {sec.audioMeta && sec.audioMeta.durationSec > 0 ? (
                               <>
                                 <span aria-hidden="true">·</span>
-                                <span className="font-mono text-[11px]">
+                                <span className="whitespace-nowrap font-mono text-[11px]">
                                   {formatDuration(sec.audioMeta.durationSec)}
                                 </span>
                               </>
                             ) : null}
                             <span aria-hidden="true">·</span>
-                            <span className="font-medium text-[#B45309]">
+                            <span className="whitespace-nowrap font-medium text-[#B45309]">
                               {formatDaysLeft(sec.deletedAt)}
                             </span>
+                            {sec.deletedAt ? (
+                              <>
+                                <span aria-hidden="true">·</span>
+                                <span className="whitespace-nowrap">
+                                  Deleted {formatTimestamp(sec.deletedAt)}
+                                </span>
+                              </>
+                            ) : null}
                           </div>
                         </div>
 
-                        <div className="flex shrink-0 flex-wrap items-center gap-1">
+                        <div className="flex shrink-0 flex-wrap items-center gap-1.5 sm:justify-end">
                           {canPlayAudio ? (
                             <button
                               type="button"
                               onClick={() => setOpenAudioId(audioOpen ? null : sec.id)}
-                              className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                              className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${
                                 audioOpen
                                   ? 'bg-[#EEF2FF] text-[#312E81]'
                                   : 'text-[#4B5563] hover:bg-[#F3F4F6] hover:text-[#111827]'
@@ -421,7 +430,7 @@ export function TrashBinView({
                           <button
                             type="button"
                             onClick={() => handleCopy(sec.id, activeVer.text)}
-                            className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-[#4B5563] transition-colors hover:bg-[#F3F4F6] hover:text-[#111827]"
+                            className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium text-[#4B5563] transition-colors hover:bg-[#F3F4F6] hover:text-[#111827]"
                           >
                             {copiedId === sec.id ? (
                               <>
@@ -439,7 +448,7 @@ export function TrashBinView({
                             type="button"
                             disabled={isBusy}
                             onClick={() => onRestoreSection(sec)}
-                            className="inline-flex items-center gap-1.5 rounded-md border border-[#E5E7EB] bg-white px-2.5 py-1.5 text-xs font-medium text-[#312E81] transition-colors hover:border-[#C7D2FE] hover:bg-[#EEF2FF] disabled:opacity-50"
+                            className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md border border-[#E5E7EB] bg-white px-2.5 py-1.5 text-xs font-medium text-[#312E81] transition-colors hover:border-[#C7D2FE] hover:bg-[#EEF2FF] disabled:opacity-50"
                           >
                             {isBusy ? (
                               <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -452,7 +461,7 @@ export function TrashBinView({
                             type="button"
                             disabled={isBusy}
                             onClick={() => onRequestDeleteSectionForever(sec)}
-                            className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-[#DC2626] transition-colors hover:bg-[#FEE2E2] disabled:opacity-50"
+                            className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium text-[#DC2626] transition-colors hover:bg-[#FEE2E2] disabled:opacity-50"
                           >
                             <Trash2 className="h-3.5 w-3.5" />
                             <span>Delete Forever</span>
