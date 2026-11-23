@@ -8,6 +8,7 @@ import {
   Pause,
   Play,
   RotateCcw,
+  Scissors,
   ShieldCheck,
   Square,
   Upload,
@@ -42,6 +43,7 @@ import {
   savePendingDraftAudio,
 } from '../lib/audioDb.ts';
 import { formatCloudErrorMessage } from '../lib/cloudStore.ts';
+import { compactRecordedSilence, formatTrimmedSilenceLabel } from '../lib/audioTrim.ts';
 import { AudioPlayerBar } from './AudioPlayerBar.tsx';
 
 interface WakeLockSentinelLike {
@@ -217,6 +219,7 @@ export function DictationDock({
   const [hasFailedAttempt, setHasFailedAttempt] = useState(false);
   const [uploadMode, setUploadMode] = useState<ProcessingMode>('full_polish');
   const [isTranscribing, setIsTranscribing] = useState(false);
+  const [isOptimizingAudio, setIsOptimizingAudio] = useState(false);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -232,6 +235,7 @@ export function DictationDock({
   const wakeLockRef = useRef<WakeLockSentinelLike | null>(null);
   const isRecordingRef = useRef<boolean>(false);
   const isTranscribingRef = useRef<boolean>(false);
+  const isOptimizingAudioRef = useRef<boolean>(false);
   const isPausedRef = useRef<boolean>(false);
   const storyIdRef = useRef<string>(storyId);
   const stagedStoryIdRef = useRef<string | null>(null);
@@ -430,6 +434,7 @@ export function DictationDock({
           draft.blob.size === 0 ||
           storyIdRef.current !== targetStoryId ||
           isRecordingRef.current ||
+          isOptimizingAudioRef.current ||
           isTranscribingRef.current
         ) {
           return;
@@ -470,9 +475,9 @@ export function DictationDock({
     };
   }, [isRecording, requestScreenWakeLock]);
 
-  // Warn before accidental refresh/close while recording or while unsent audio is staged
+  // Warn before accidental refresh/close while recording, optimizing, or while unsent audio is staged
   useEffect(() => {
-    if (!isRecording && !stagedAudio && !isTranscribing) return;
+    if (!isRecording && !isOptimizingAudio && !stagedAudio && !isTranscribing) return;
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       e.preventDefault();
       e.returnValue = '';
@@ -481,13 +486,13 @@ export function DictationDock({
     return () => {
       window.removeEventListener('beforeunload', handleBeforeUnload);
     };
-  }, [isRecording, stagedAudio, isTranscribing]);
+  }, [isRecording, isOptimizingAudio, stagedAudio, isTranscribing]);
 
   // Restore any unsent local IndexedDB audio draft for the opened story
   useEffect(() => {
     let cancelled = false;
-    // Never wipe staged audio or recovery state while actively recording or transcribing
-    if (isRecordingRef.current || isTranscribingRef.current) return;
+    // Never wipe staged audio or recovery state while actively recording, optimizing, or transcribing
+    if (isRecordingRef.current || isOptimizingAudioRef.current || isTranscribingRef.current) return;
 
     if (stagedUrlRef.current) {
       URL.revokeObjectURL(stagedUrlRef.current);
@@ -722,31 +727,55 @@ export function DictationDock({
           firstChunkType ||
           mimeType ||
           (appleSafari ? 'audio/mp4' : 'audio/webm');
-        const blob = new Blob(chunksRef.current, { type: resolvedMime });
+        const rawBlob = new Blob(chunksRef.current, { type: resolvedMime });
         chunksRef.current = [];
         stopWaveformAndTracks();
         setIsRecording(false);
         setIsPaused(false);
 
-        if (blob.size === 0) {
+        if (rawBlob.size === 0) {
           setErrorMessage('No audio data was captured. Please check your microphone input.');
           return;
         }
 
-        const measuredDuration = await getAudioDuration(blob, recordedDuration);
-        const filename = buildRecordingFilename(storyTitle, resolvedMime);
-        const objectUrl = URL.createObjectURL(blob);
+        // Run fast client-side smart silence compaction before saving to IndexedDB and sending to Gemini
+        isOptimizingAudioRef.current = true;
+        setIsOptimizingAudio(true);
+        let finalBlob = rawBlob;
+        let finalMime = resolvedMime;
+        let measuredDuration = recordedDuration;
+        let trimmedSilenceSec: number | undefined;
+
+        try {
+          const compacted = await compactRecordedSilence(rawBlob, recordedDuration, resolvedMime);
+          finalBlob = compacted.blob;
+          finalMime = compacted.mimeType;
+          measuredDuration = compacted.wasCompacted
+            ? compacted.durationSec
+            : await getAudioDuration(finalBlob, compacted.durationSec);
+          if (compacted.wasCompacted && compacted.trimmedSilenceSec >= 2) {
+            trimmedSilenceSec = compacted.trimmedSilenceSec;
+          }
+        } catch {
+          measuredDuration = await getAudioDuration(rawBlob, recordedDuration);
+        } finally {
+          isOptimizingAudioRef.current = false;
+          setIsOptimizingAudio(false);
+        }
+
+        const filename = buildRecordingFilename(storyTitle, finalMime);
+        const objectUrl = URL.createObjectURL(finalBlob);
         stagedUrlRef.current = objectUrl;
 
-        // Immediately back up the finished recording to IndexedDB under its originating story
+        // Immediately back up the finished (compacted) recording to IndexedDB under its originating story
         void savePendingDraftAudio(
           recordingStoryId,
-          blob,
+          finalBlob,
           {
             filename,
-            mimeType: resolvedMime,
+            mimeType: finalMime,
             durationSec: measuredDuration,
-            sizeBytes: blob.size,
+            sizeBytes: finalBlob.size,
           },
           'recording',
         );
@@ -763,13 +792,14 @@ export function DictationDock({
         setIsRecoveredDraft(false);
         setHasFailedAttempt(false);
         setStagedAudio({
-          blob,
+          blob: finalBlob,
           url: objectUrl,
           filename,
-          mimeType: resolvedMime,
+          mimeType: finalMime,
           durationSec: measuredDuration,
-          sizeBytes: blob.size,
+          sizeBytes: finalBlob.size,
           source: 'recording',
+          trimmedSilenceSec,
         });
       };
 
@@ -922,7 +952,7 @@ export function DictationDock({
   const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     setIsDraggingOver(false);
-    if (isRecording || isTranscribing) return;
+    if (isRecording || isOptimizingAudio || isTranscribing) return;
     const file = e.dataTransfer.files?.[0];
     if (file) {
       await stageUploadedFile(file);
@@ -1026,6 +1056,7 @@ export function DictationDock({
   const collapseIdleForMainTyping =
     isMainTyping &&
     !isRecording &&
+    !isOptimizingAudio &&
     !visibleStagedAudio &&
     !isTranscribing &&
     !settingsOpen &&
@@ -1187,7 +1218,7 @@ export function DictationDock({
         aria-label="Voice dictation and audio upload dock"
         onDragOver={(e) => {
           e.preventDefault();
-          if (!isRecording && !isTranscribing) setIsDraggingOver(true);
+          if (!isRecording && !isOptimizingAudio && !isTranscribing) setIsDraggingOver(true);
         }}
         onDragLeave={() => setIsDraggingOver(false)}
         onDrop={handleDrop}
@@ -1291,6 +1322,16 @@ export function DictationDock({
               </button>
             </div>
           </div>
+        ) : isOptimizingAudio ? (
+          /* Brief Client-Side Silence Compaction State */
+          <div
+            role="status"
+            aria-live="polite"
+            className="flex h-10 items-center justify-center gap-2 text-xs font-medium text-[#4B5563]"
+          >
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-[#312E81]" aria-hidden="true" />
+            <span>Optimizing audio…</span>
+          </div>
         ) : visibleStagedAudio ? (
           /* Staged Audio State: compact preview player, settings pill, Discard & Transcribe & Polish */
           <div className="space-y-2.5">
@@ -1339,6 +1380,15 @@ export function DictationDock({
               }}
               compact
             />
+
+            {visibleStagedAudio.trimmedSilenceSec && visibleStagedAudio.trimmedSilenceSec >= 2 ? (
+              <div className="flex items-center gap-1.5 px-0.5 text-[11px] text-[#6B7280] tabular-nums">
+                <Scissors className="h-3 w-3 shrink-0 text-[#312E81]/75" aria-hidden="true" />
+                <span>
+                  Trimmed {formatTrimmedSilenceLabel(visibleStagedAudio.trimmedSilenceSec)} of silence
+                </span>
+              </div>
+            ) : null}
 
             {visibleStagedAudio.source === 'upload' && (
               <div className="flex items-center justify-between gap-2">

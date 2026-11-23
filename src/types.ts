@@ -90,6 +90,7 @@ export interface StagedAudio {
   durationSec: number;
   sizeBytes: number;
   source: 'recording' | 'upload';
+  trimmedSilenceSec?: number;
 }
 
 export const STYLE_LABELS: Record<WritingStyle, string> = {
